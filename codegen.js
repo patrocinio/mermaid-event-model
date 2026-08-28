@@ -97,6 +97,18 @@ function camel(s) {
 function constant(s) {
   return words(s).map((w) => w.toUpperCase()).join("_") || "TAG";
 }
+function kebab(s) {
+  return words(s).map((w) => w.toLowerCase()).join("-") || "app";
+}
+
+// Resource naming for the AWS target, derived from the model's namespace so
+// generated stacks are named after the model — not any sibling project.
+//   resourcePrefix  → lower-kebab, used in physical names (streams, functions)
+//   ResourcePrefix  → PascalCase, used in a human-facing API name
+//   apiPath         → plural lower-kebab path segment for the REST resource
+const resourcePrefix = kebab(EVENT_NAMESPACE);
+const ResourcePrefix = pascal(EVENT_NAMESPACE);
+const apiPath = "records";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Emit buffer with indentation.
@@ -1428,6 +1440,9 @@ function genAwsCommandHandler(out, parts, model) {
   if (cmds.length === 0) return false;
   const producedByCommand = producedByCommandMap(model, parts);
   const MAX_RETRIES = 5;
+  // Automation slices (command + automation element) call a SageMaker endpoint
+  // for inference and fold the response into the emitted event's payload.
+  const isAutomation = parts.automation.length > 0;
 
   out.line("// ── Command Lambda (write side, DCB-enforced) ───────────────────────");
   out.line("// API Gateway → this handler. Each command's `reads [types] by [axes]`");
@@ -1523,14 +1538,57 @@ function genAwsCommandHandler(out, parts, model) {
       out.line("};");
     };
 
-    // Build the payload object from the produced event's non-axis fields.
+    // Fields the emitted event carries that neither the command supplies nor a
+    // tag axis provides — for an automation slice these are the prediction the
+    // model returns (recorded as decided exclusions in the slice spec).
+    const cmdFieldNamesForSm = new Set((cmd.fields || []).map((f) => f.name));
+    const inferredFields = ((ev && ev.fields) || []).filter(
+      (f) => !f.axis && !cmdFieldNamesForSm.has(f.name)
+    );
+
+    // For an automation slice, invoke the SageMaker endpoint and destructure
+    // the inferred fields off its response so the payload builder can use them.
+    const emitSageMakerCall = () => {
+      if (!isAutomation) return;
+      out.blank();
+      out.line("// ── Inference: call the SageMaker endpoint for this slice ──────────");
+      out.line("// Feature vector for the model. The command fields and boundary state");
+      out.line("// are the inputs; adjust the shape to match your endpoint's contract.");
+      out.line("const features: Record<string, unknown> = {");
+      out.push();
+      for (const f of cmd.fields || []) out.line(`${camel(f.name)}: ${camel(f.name)},`);
+      out.pop();
+      out.line("};");
+      if (inferredFields.length) {
+        out.line("// Prediction returned by the endpoint (the event's inferred fields).");
+        out.line("const prediction = await invokeSageMaker<{");
+        out.push();
+        for (const f of inferredFields) out.line(`${camel(f.name)}?: ${tsType(f.type)};`);
+        out.pop();
+        out.line("}>(features);");
+      } else {
+        out.line("const prediction = await invokeSageMaker(features);");
+      }
+      out.blank();
+    };
+
+    // Build the payload object from the produced event's non-axis fields. On an
+    // automation slice, inferred fields are sourced from the SageMaker response.
     const emitPayloadObject = () => {
       out.line("const payload: Record<string, unknown> = {");
       out.push();
       const cmdFieldNames = new Set((cmd.fields || []).map((f) => f.name));
+      const inferredNames = new Set(inferredFields.map((f) => f.name));
       for (const f of (ev && ev.fields) || []) {
         if (f.axis) continue;
-        const src = cmdFieldNames.has(f.name) ? camel(f.name) : `body.${camel(f.name)}`;
+        let src;
+        if (isAutomation && inferredNames.has(f.name)) {
+          src = `prediction.${camel(f.name)}`;
+        } else if (cmdFieldNames.has(f.name)) {
+          src = camel(f.name);
+        } else {
+          src = `body.${camel(f.name)}`;
+        }
         out.line(`${camel(f.name)}: ${src},`);
       }
       out.pop();
@@ -1542,6 +1600,7 @@ function genAwsCommandHandler(out, parts, model) {
       // written through appendWithinBoundary (with no guards) for a uniform path.
       out.line("// Creation command — no `reads`, so the boundary is empty (no guards).");
       emitTagsObject();
+      emitSageMakerCall();
       emitPayloadObject();
       if (ev) {
         out.line(`const domainEvent = createEvent(EventTypes.${eventTypeKey(ev)}, tags, payload);`);
@@ -1589,6 +1648,7 @@ function genAwsCommandHandler(out, parts, model) {
       out.line("if (validationError) return response(409, { error: validationError });");
       out.blank();
       emitTagsObject();
+      emitSageMakerCall();
       emitPayloadObject();
       if (ev) {
         out.line(`const domainEvent = createEvent(EventTypes.${eventTypeKey(ev)}, tags, payload);`);
@@ -1799,6 +1859,9 @@ const AWS_SHARED_MODULE = "../shared/event-store";
 // Kept here so the emitted import statement and the shared module stay in sync.
 function awsSharedImports(parts) {
   const isCommand = parts.command.length > 0;
+  // An automation slice pairs a command with an automation element: the command
+  // is driven by an automated process that calls out to a model for inference.
+  const isAutomation = isCommand && parts.automation.length > 0;
   const base = ["DomainEvent", "EventTypes", "createEvent", "response"];
   if (isCommand) {
     return [
@@ -1808,6 +1871,8 @@ function awsSharedImports(parts) {
       "appendWithinBoundary",
       "ConcurrencyError",
       "publishToKinesis",
+      // Automation slices invoke a SageMaker endpoint before emitting the event.
+      ...(isAutomation ? ["invokeSageMaker"] : []),
     ];
   }
   // View slice: the projector/query need the Redis accessor instead of the
@@ -1875,6 +1940,12 @@ function genAwsSharedRuntime(out) {
   out.pop();
   out.line("} from '@aws-sdk/lib-dynamodb';");
   out.line("import { KinesisClient, PutRecordCommand } from '@aws-sdk/client-kinesis';");
+  out.line("import {");
+  out.push();
+  out.line("SageMakerRuntimeClient,");
+  out.line("InvokeEndpointCommand,");
+  out.pop();
+  out.line("} from '@aws-sdk/client-sagemaker-runtime';");
   out.line("import { ulid } from 'ulid';");
   out.line("import Redis from 'ioredis';");
   out.blank();
@@ -1883,8 +1954,12 @@ function genAwsSharedRuntime(out) {
   out.line("  marshallOptions: { removeUndefinedValues: true },");
   out.line("});");
   out.line("const kinesis = new KinesisClient({});");
+  out.line("const sagemakerRuntime = new SageMakerRuntimeClient({});");
   out.line("const TABLE_NAME = process.env.EVENT_TABLE_NAME!;");
   out.line("const STREAM_NAME = process.env.KINESIS_STREAM_NAME!;");
+  out.line("// Endpoint invoked by automation slices that call a model for inference.");
+  out.line("// Set on the command Lambda by the CDK stack; empty until an endpoint exists.");
+  out.line("const SAGEMAKER_ENDPOINT_NAME = process.env.SAGEMAKER_ENDPOINT_NAME || '';");
   out.blank();
 
   out.line("// ── Dynamic Consistency Boundary (DCB) primitives ───────────────────");
@@ -2109,6 +2184,42 @@ function genAwsSharedRuntime(out) {
   out.line("}");
   out.blank();
 
+  out.line("// Invoke a SageMaker real-time endpoint for inference. Automation slices");
+  out.line("// call this to turn a feature vector into a prediction, then record the");
+  out.line("// result as a domain event. `features` is JSON-serialised as the request");
+  out.line("// body; the parsed JSON response is returned to the caller. Throws if no");
+  out.line("// endpoint is configured or the response body is empty.");
+  out.line("export async function invokeSageMaker<T = Record<string, unknown>>(");
+  out.push();
+  out.line("features: Record<string, unknown>,");
+  out.line("endpointName: string = SAGEMAKER_ENDPOINT_NAME");
+  out.pop();
+  out.line("): Promise<T> {");
+  out.push();
+  out.line("if (!endpointName) {");
+  out.push();
+  out.line("throw new Error('SAGEMAKER_ENDPOINT_NAME is not set — no endpoint to invoke');");
+  out.pop();
+  out.line("}");
+  out.line("const result = await sagemakerRuntime.send(");
+  out.push();
+  out.line("new InvokeEndpointCommand({");
+  out.push();
+  out.line("EndpointName: endpointName,");
+  out.line("ContentType: 'application/json',");
+  out.line("Accept: 'application/json',");
+  out.line("Body: Buffer.from(JSON.stringify(features)),");
+  out.pop();
+  out.line("})");
+  out.pop();
+  out.line(");");
+  out.line("if (!result.Body) throw new Error('SageMaker returned an empty response body');");
+  out.line("const text = Buffer.from(result.Body as Uint8Array).toString('utf-8');");
+  out.line("return JSON.parse(text) as T;");
+  out.pop();
+  out.line("}");
+  out.blank();
+
   out.line("// Lazily-initialised Redis (ElastiCache) client for the read side.");
   out.line("let redis: Redis;");
   out.line("export function getRedis(): Redis {");
@@ -2168,6 +2279,9 @@ function genAwsSharedInfra(out, allEvents) {
 function genAwsRegionalStack(out, model, parts, modelName, tier) {
   const hasCommand = parts.command.length > 0 || model.elements.some((e) => e.kind === "command");
   const hasReadModel = parts.readModel.length > 0 || model.elements.some((e) => e.kind === "readModel");
+  // An automation anywhere in the model means the command Lambda invokes a
+  // SageMaker endpoint, so the stack must grant it and pass the endpoint name.
+  const hasAutomation = parts.automation.length > 0 || model.elements.some((e) => e.kind === "automation");
   const minimal = tier === "minimal";
 
   out.line("// ─────────────────────────────────────────────────────────────");
@@ -2195,6 +2309,7 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
   out.line("import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';");
   out.line("import * as apigateway from 'aws-cdk-lib/aws-apigateway';");
   out.line("import * as eventsources from 'aws-cdk-lib/aws-lambda-event-sources';");
+  if (hasAutomation) out.line("import * as iam from 'aws-cdk-lib/aws-iam';");
   out.line("import { Construct } from 'constructs';");
   out.line("import * as path from 'path';");
   out.blank();
@@ -2204,6 +2319,12 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
   out.line("regionLabel: string;");
   out.line("globalTable: dynamodb.Table;");
   out.line("isPrimary: boolean;");
+  if (hasAutomation) {
+    out.line("// Name of the SageMaker endpoint automation slices invoke for inference.");
+    out.line("// Optional: when omitted, InvokeEndpoint is granted account-wide and the");
+    out.line("// handler errors at runtime until an endpoint name is supplied.");
+    out.line("sagemakerEndpointName?: string;");
+  }
   out.pop();
   out.line("}");
   out.blank();
@@ -2250,7 +2371,7 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
   out.line("// ── Event distribution — regional Kinesis stream ──");
   out.line("const stream = new kinesis.Stream(this, 'EventStream', {");
   out.push();
-  out.line("streamName: `loan-events-${props.regionLabel}`,");
+  out.line("streamName: `" + resourcePrefix + "-events-${props.regionLabel}`,");
   out.line("shardCount: 2,");
   out.line("retentionPeriod: cdk.Duration.hours(168),");
   out.pop();
@@ -2263,12 +2384,12 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
   out.push();
   out.line("description: `Redis subnet group - ${props.regionLabel}`,");
   out.line("subnetIds: vpc.privateSubnets.map((s) => s.subnetId),");
-  out.line("cacheSubnetGroupName: `loan-redis-${props.regionLabel}`,");
+  out.line("cacheSubnetGroupName: `" + resourcePrefix + "-redis-${props.regionLabel}`,");
   out.pop();
   out.line("});");
   out.line("const redisReplicationGroup = new elasticache.CfnReplicationGroup(this, 'RedisCluster', {");
   out.push();
-  out.line("replicationGroupDescription: `Loan read model - ${props.regionLabel}`,");
+  out.line("replicationGroupDescription: `" + ResourcePrefix + " read model - ${props.regionLabel}`,");
   out.line("engine: 'redis',");
   out.line("engineVersion: '7.1',");
   out.line(minimal ? "cacheNodeType: 'cache.t4g.micro'," : "cacheNodeType: 'cache.r7g.large',");
@@ -2281,7 +2402,7 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
   out.line("atRestEncryptionEnabled: true,");
   out.line("transitEncryptionEnabled: true,");
   out.line("autoMinorVersionUpgrade: true,");
-  out.line("replicationGroupId: `loan-cache-${props.regionLabel}`,");
+  out.line("replicationGroupId: `" + resourcePrefix + "-cache-${props.regionLabel}`,");
   out.pop();
   out.line("});");
   out.line("redisReplicationGroup.addDependency(subnetGroup);");
@@ -2347,18 +2468,39 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
     out.line("...commonProps,");
     out.line("entry: path.join(__dirname, '../../src/commands/handler.ts'),");
     out.line("handler: 'handler',");
-    out.line("functionName: `loan-command-${props.regionLabel}`,");
+    out.line("functionName: `" + resourcePrefix + "-command-${props.regionLabel}`,");
     out.line("timeout: cdk.Duration.seconds(10),");
     out.line("environment: {");
     out.push();
-    out.line("EVENT_TABLE_NAME: 'LoanEvents',");
+    out.line("EVENT_TABLE_NAME: props.globalTable.tableName,");
     out.line("KINESIS_STREAM_NAME: stream.streamName,");
+    if (hasAutomation) {
+      out.line("// SageMaker endpoint invoked by automation slices for inference.");
+      out.line("// Provide the deployed endpoint name via the SAGEMAKER_ENDPOINT_NAME");
+      out.line("// context/env; empty until an endpoint exists (the handler then errors).");
+      out.line("SAGEMAKER_ENDPOINT_NAME: props.sagemakerEndpointName ?? '',");
+    }
     out.pop();
     out.line("},");
     out.pop();
     out.line("});");
     out.line("props.globalTable.grantReadWriteData(commandHandler);");
     out.line("stream.grantWrite(commandHandler);");
+    if (hasAutomation) {
+      out.blank();
+      out.line("// Allow the command Lambda to invoke the model endpoint. Scoped to a");
+      out.line("// named endpoint when provided, else to any endpoint in this account.");
+      out.line("commandHandler.addToRolePolicy(new iam.PolicyStatement({");
+      out.push();
+      out.line("actions: ['sagemaker:InvokeEndpoint'],");
+      out.line("resources: [props.sagemakerEndpointName");
+      out.push();
+      out.line("? `arn:aws:sagemaker:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:endpoint/${props.sagemakerEndpointName}`");
+      out.line(": `arn:aws:sagemaker:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:endpoint/*`],");
+      out.pop();
+      out.pop();
+      out.line("}));");
+    }
     out.blank();
   }
 
@@ -2369,7 +2511,7 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
     out.line("...commonProps,");
     out.line("entry: path.join(__dirname, '../../src/queries/handler.ts'),");
     out.line("handler: 'handler',");
-    out.line("functionName: `loan-query-${props.regionLabel}`,");
+    out.line("functionName: `" + resourcePrefix + "-query-${props.regionLabel}`,");
     out.line("timeout: cdk.Duration.seconds(5),");
     out.line("vpc,");
     out.line("vpcSubnets: { subnets: vpc.privateSubnets },");
@@ -2385,7 +2527,7 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
     out.line("...commonProps,");
     out.line("entry: path.join(__dirname, '../../src/projector/handler.ts'),");
     out.line("handler: 'handler',");
-    out.line("functionName: `loan-projector-${props.regionLabel}`,");
+    out.line("functionName: `" + resourcePrefix + "-projector-${props.regionLabel}`,");
     out.line("timeout: cdk.Duration.seconds(30),");
     out.line("vpc,");
     out.line("vpcSubnets: { subnets: vpc.privateSubnets },");
@@ -2417,9 +2559,9 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
 
   // API Gateway + routes
   out.line("// ── API Gateway (prod stage, throttled, CORS) ──");
-  out.line("const api = new apigateway.RestApi(this, 'LoanApi', {");
+  out.line("const api = new apigateway.RestApi(this, '" + ResourcePrefix + "Api', {");
   out.push();
-  out.line("restApiName: `Loan API (${props.regionLabel})`,");
+  out.line("restApiName: `" + ResourcePrefix + " API (${props.regionLabel})`,");
   out.line("deployOptions: {");
   out.push();
   out.line("stageName: 'prod',");
@@ -2439,14 +2581,14 @@ function genAwsRegionalStack(out, model, parts, modelName, tier) {
   out.line("});");
   out.blank();
   out.line("const apiResource = api.root.addResource('api');");
-  out.line("const loansResource = apiResource.addResource('loans');");
+  out.line("const recordsResource = apiResource.addResource('" + apiPath + "');");
   if (hasCommand) {
-    out.line("loansResource.addMethod('POST', new apigateway.LambdaIntegration(commandHandler));");
+    out.line("recordsResource.addMethod('POST', new apigateway.LambdaIntegration(commandHandler));");
   }
   if (hasReadModel) {
-    out.line("loansResource.addMethod('GET', new apigateway.LambdaIntegration(queryHandler));");
-    out.line("const loanByIdResource = loansResource.addResource('{id}');");
-    out.line("loanByIdResource.addMethod('GET', new apigateway.LambdaIntegration(queryHandler));");
+    out.line("recordsResource.addMethod('GET', new apigateway.LambdaIntegration(queryHandler));");
+    out.line("const recordByIdResource = recordsResource.addResource('{id}');");
+    out.line("recordByIdResource.addMethod('GET', new apigateway.LambdaIntegration(queryHandler));");
   }
   out.pop();
   out.line("}");

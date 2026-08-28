@@ -2,6 +2,8 @@
 
 The same hotel-booking model rewritten in Dynamic Consistency Boundary style: no aggregates, with `reads [...]` clauses on commands declaring the past event types they replay for consistency. Domain events without a `:<Aggregate>` qualifier land in a synthesized `Events` lane below `Time`.
 
+It also includes an ML integration slice: a `Demand Forecaster` automation folds the booking/stay lifecycle into an `Occupancy Demand` signal, calls an Amazon SageMaker endpoint on each `Forecast Tick`, and records the prediction as an `Occupancy Forecasted` domain event — so the forecast becomes a first-class, auditable, replayable fact like any other event.
+
 ## Model
 
 ```mermaid
@@ -312,4 +314,63 @@ eventModel
 	slice view_sales_report["View Sales Report"]
 		paymentSucceeded-->salesReport
 		salesReport-->sales_ui
+
+	readModel occupancyDemand["Occupancy Demand"] {
+		*roomType: string
+		*night: date
+		roomsAvailable: int
+		roomsBooked: int
+		roomsOccupied: int
+		bookingVelocity: int
+	}
+	slice track_occupancy_demand["Track Occupancy Demand"]
+		roomAdded-->occupancyDemand
+		booked-->occupancyDemand
+		checkedIn-->occupancyDemand
+		checkedOut-->occupancyDemand
+
+	externalEvent forecastTick["Forecast Tick"] {
+		occurredAt: timestamp
+	}
+	automation:System demandForecaster["Demand Forecaster"]
+	command forecastOccupancy["Forecast Occupancy"] {
+		roomType: string
+		horizonNights: int
+	}
+		reads [occupancyForecasted] by roomType
+	domainEvent occupancyForecasted["Occupancy Forecasted"] {
+		*forecastId: UUID
+		*roomType: string
+		forecastFrom: date
+		forecastThrough: date
+		predictedOccupancyRate: decimal
+		predictedDemand: int
+		modelVersion: string
+		endpointName: string
+		forecastedAt: timestamp
+	}
+	slice forecast_occupancy["Forecast Occupancy"]
+		occupancyDemand-->demandForecaster
+		forecastTick-->demandForecaster
+		demandForecaster-->forecastOccupancy
+		forecastOccupancy-->occupancyForecasted
+
+	readModel demandForecast["Demand Forecast"] {
+		*roomType: string
+		forecastFrom: date
+		forecastThrough: date
+		predictedOccupancyRate: decimal
+		predictedDemand: int
+		modelVersion: string
+	}
+	ui:Manager forecast_ui["Demand Forecast UI"] {
+		roomType: string
+		forecastFrom: date
+		forecastThrough: date
+		predictedOccupancyRate: decimal
+		predictedDemand: int
+	}
+	slice view_demand_forecast["View Demand Forecast"]
+		occupancyForecasted-->demandForecast
+		demandForecast-->forecast_ui
 ```
