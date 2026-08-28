@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+
+# CDK synth output (contains resolved account/region — regenerate with `cdk synth`)
+cdk.out/
+*.cdk.staging/
+
+# CDK cached context (account-specific AZ/VPC lookups — regenerated on synth)
+cdk.context.json
+
+# TypeScript build artifacts
+*.js
+*.d.ts
+*.tsbuildinfo
+!emit.mjs
+
+# logs / env
+*.log
+.env
+.env.*
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
