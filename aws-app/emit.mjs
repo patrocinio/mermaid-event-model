@@ -54,13 +54,11 @@ write(
 //    src/commands/handler.ts entry points at.
 write("src/commands/handler.ts", generateAwsFromSource(modelSrc, { part: "slice", sliceName: "commands" }));
 
-// 4) Projector + query: generated from the whole model's view surface. A
-//    view-only source emits handler() (projector) + queryHandler() (query).
-//    We pick a representative view slice that folds the widest event set, then
-//    write thin entry files that re-export the expected symbol name.
-const viewSliceFile = "view-room-availability.md";
-const viewSrc = fs.readFileSync(path.join(SLICES_DIR, viewSliceFile), "utf8");
-write("src/_generated/view.ts", generateAwsFromSource(viewSrc, { sliceName: "views" }));
+// 4) Projector + query: generated from the WHOLE model's view surface via the
+//    'projection' part, so the projector folds EVERY read model's source events
+//    (not just one slice's) and emits handler() (projector) + queryHandler().
+//    Thin entry files re-export the expected symbol names.
+write("src/_generated/view.ts", generateAwsFromSource(modelSrc, { part: "projection", sliceName: "views" }));
 write(
   "src/projector/handler.ts",
   `// Projector entry — re-exports the generated projector (DynamoDB Streams → Redis).\nexport { handler } from '../_generated/view';\n`

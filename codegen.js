@@ -1149,6 +1149,13 @@ function producedByCommandMap(model, parts) {
   return produced;
 }
 
+// Unique projector handler name for an (event, read model) pair, e.g.
+// onOccupancyForecastedIntoDemandForecast — so a projector serving many read
+// models never collides on a shared source event.
+function projFnName(evId, rm) {
+  return `on${pascal(evId)}Into${pascal(rm.id)}`;
+}
+
 // Source events feeding a read model (edges: event -> readModel).
 function sourceEventsFor(model, parts, readModelId) {
   const eventIds = new Set([...parts.domainEvent, ...parts.externalEvent].map((e) => e.id));
@@ -1468,10 +1475,40 @@ function genAwsCommandHandler(out, parts, model) {
   out.push();
   out.line("if (event.httpMethod !== 'POST') return response(405, { error: 'Method not allowed' });");
   out.line("const body = event.body ? JSON.parse(event.body) : {};");
-  cmds.forEach((cmd) => {
-    out.line(`// Route: handle ${tsStr(cmd.label)}`);
+  if (cmds.length === 1) {
+    // Single command: no discriminator needed.
+    const cmd = cmds[0];
+    out.line(`// Only one command in this slice.`);
     out.line(`return handle${typeNameFor(cmd)}(event, body);`);
-  });
+  } else {
+    // Multiple commands: dispatch on a `command` discriminator in the request
+    // body (or the `command` path parameter), matched against each command id.
+    out.line("// Dispatch on the `command` discriminator (body.command or path).");
+    out.line("const command = String(");
+    out.push();
+    out.line("(body as { command?: unknown }).command ?? event.pathParameters?.command ?? ''");
+    out.pop();
+    out.line(");");
+    out.line("switch (command) {");
+    out.push();
+    cmds.forEach((cmd) => {
+      out.line(`case ${tsStr(cmd.id)}:`);
+      out.push();
+      out.line(`return handle${typeNameFor(cmd)}(event, body);`);
+      out.pop();
+    });
+    out.line("default:");
+    out.push();
+    out.line("return response(400, {");
+    out.push();
+    out.line("error: `Unknown or missing command: '${command}'`,");
+    out.line(`commands: [${cmds.map((c) => tsStr(c.id)).join(", ")}],`);
+    out.pop();
+    out.line("});");
+    out.pop();
+    out.pop();
+    out.line("}");
+  }
   out.pop();
   out.line("} catch (err) {");
   out.push();
@@ -1548,14 +1585,21 @@ function genAwsCommandHandler(out, parts, model) {
 
     // For an automation slice, invoke the SageMaker endpoint and destructure
     // the inferred fields off its response so the payload builder can use them.
-    const emitSageMakerCall = () => {
+    // `hasState` is true on the boundary path (a `rehydrate(events)` state is in
+    // scope) — its read-model-derived fields are the real feature inputs, so we
+    // spread it first and let explicit command fields override on collision.
+    const emitSageMakerCall = (hasState) => {
       if (!isAutomation) return;
       out.blank();
       out.line("// ── Inference: call the SageMaker endpoint for this slice ──────────");
-      out.line("// Feature vector for the model. The command fields and boundary state");
-      out.line("// are the inputs; adjust the shape to match your endpoint's contract.");
+      out.line("// Feature vector for the model, in precedence order (later overrides");
+      out.line("// earlier): the request body (the demand snapshot the caller/scheduler");
+      out.line("// supplies), the rehydrated boundary state, then the typed command");
+      out.line("// fields. Adjust the shape to match your endpoint's contract.");
       out.line("const features: Record<string, unknown> = {");
       out.push();
+      out.line("...body,");
+      if (hasState) out.line("...(state as unknown as Record<string, unknown>),");
       for (const f of cmd.fields || []) out.line(`${camel(f.name)}: ${camel(f.name)},`);
       out.pop();
       out.line("};");
@@ -1600,7 +1644,7 @@ function genAwsCommandHandler(out, parts, model) {
       // written through appendWithinBoundary (with no guards) for a uniform path.
       out.line("// Creation command — no `reads`, so the boundary is empty (no guards).");
       emitTagsObject();
-      emitSageMakerCall();
+      emitSageMakerCall(false);
       emitPayloadObject();
       if (ev) {
         out.line(`const domainEvent = createEvent(EventTypes.${eventTypeKey(ev)}, tags, payload);`);
@@ -1648,7 +1692,7 @@ function genAwsCommandHandler(out, parts, model) {
       out.line("if (validationError) return response(409, { error: validationError });");
       out.blank();
       emitTagsObject();
-      emitSageMakerCall();
+      emitSageMakerCall(true);
       emitPayloadObject();
       if (ev) {
         out.line(`const domainEvent = createEvent(EventTypes.${eventTypeKey(ev)}, tags, payload);`);
@@ -1690,10 +1734,35 @@ function genAwsProjection(out, parts, model) {
   if (parts.command.length > 0) return false;
   const readModels = parts.readModel;
   if (readModels.length === 0) return false;
-  const rm = readModels[0];
-  const sources = sourceEventsFor(model, parts, rm.id);
   const knownEvents = new Map([...parts.domainEvent, ...parts.externalEvent].map((e) => [e.id, e]));
-  const view = typeNameFor(rm);
+
+  // A projector may serve MANY read models (when generated from the whole
+  // model). Build, per read model, its source events and its Redis key info.
+  // The dispatch maps each source event to every (read model) it feeds, so one
+  // streamed event can update multiple read models; unrelated events are
+  // ignored gracefully.
+  const rmInfos = readModels.map((rm) => {
+    const keyField = (rm.fields || []).find((f) => f.axis) || (rm.fields || [])[0];
+    return {
+      rm,
+      view: typeNameFor(rm),
+      prefix: camel(rm.id),
+      keyName: keyField ? camel(keyField.name) : "id",
+      sources: sourceEventsFor(model, parts, rm.id),
+    };
+  });
+  // event id -> [rmInfo, ...]
+  const dispatch = new Map();
+  for (const info of rmInfos) {
+    for (const evId of info.sources) {
+      if (!dispatch.has(evId)) dispatch.set(evId, []);
+      dispatch.get(evId).push(info);
+    }
+  }
+  // The primary read model backs the query handler / stack query entry.
+  const rm = readModels[0];
+  const sources = [...dispatch.keys()];
+  const view = rmInfos[0].view;
 
   // ── Projector: DynamoDB Streams → Redis read model.
   out.line("// ── Projector Lambda (read side) — DynamoDB Streams → Redis ─────────");
@@ -1707,7 +1776,7 @@ function genAwsProjection(out, parts, model) {
   out.line("import Redis from 'ioredis';");
   out.blank();
 
-  const keyPrefix = camel(rm.id);
+  const keyPrefix = rmInfos[0].prefix;
   out.line("export async function handler(event: DynamoDBStreamEvent): Promise<void> {");
   out.push();
   out.line("const client = getRedis();");
@@ -1721,34 +1790,31 @@ function genAwsProjection(out, parts, model) {
   out.line("}");
   out.blank();
 
-  // The read model's identity field (its *-axis field, or first field) is the
-  // key of each Redis record; its value is read from the event's tags (axis
-  // values live in `tags`), falling back to the event id.
-  const rmKeyField = (rm.fields || []).find((f) => f.axis) || (rm.fields || [])[0];
-  const rmKeyName = rmKeyField ? camel(rmKeyField.name) : "id";
-
   out.line("async function processRecord(client: Redis, record: DynamoDBRecord): Promise<void> {");
   out.push();
   out.line("if (!record.dynamodb?.NewImage) return;");
   out.line("const item = unmarshall(record.dynamodb.NewImage as Record<string, AttributeValue>) as DomainEvent;");
   out.line("const { eventId, eventType, timestamp, tags, payload } = item;");
-  out.line(`// The record key: the read model's identity from the event tags, else the eventId.`);
-  out.line(`const recordKey = tags[${tsStr(rmKeyName)}] ?? eventId;`);
   out.line("switch (eventType) {");
   out.push();
   if (sources.length === 0) {
-    out.line("// TODO: no source events wired to this read model in the slice edges.");
+    out.line("// TODO: no source events wired to any read model in the model edges.");
   }
   for (const evId of sources) {
     out.line(`case EventTypes.${eventTypeKey(evId)}:`);
     out.push();
-    out.line(`await on${pascal(evId)}(client, recordKey, timestamp, tags, payload);`);
+    // One streamed event may feed several read models — invoke each.
+    for (const info of dispatch.get(evId)) {
+      const recKey = `tags[${tsStr(info.keyName)}] ?? eventId`;
+      out.line(`await ${projFnName(evId, info.rm)}(client, ${recKey}, timestamp, tags, payload);`);
+    }
     out.line("break;");
     out.pop();
   }
   out.line("default:");
   out.push();
-  out.line("console.warn(`Unknown event type: ${eventType}`);");
+  out.line("// Event not consumed by any read model in this model — ignore.");
+  out.line("break;");
   out.pop();
   out.pop();
   out.line("}");
@@ -1756,44 +1822,53 @@ function genAwsProjection(out, parts, model) {
   out.line("}");
   out.blank();
 
-  // One handler function per source event: write/merge the read-model record.
-  for (const evId of sources) {
-    const ev = knownEvents.get(evId);
-    out.line(`async function on${pascal(evId)}(`);
-    out.push();
-    out.line("client: Redis,");
-    out.line("recordKey: string,");
-    out.line("timestamp: string,");
-    out.line("tags: Record<string, string>,");
-    out.line("payload: Record<string, unknown>");
-    out.pop();
-    out.line("): Promise<void> {");
-    out.push();
-    out.line(`// Merge ${tsStr(ev ? ev.label : evId)} into the ${view} record.`);
-    out.line(`const existing = await client.get(\`${keyPrefix}:\${recordKey}\`);`);
-    out.line(`const view: Record<string, unknown> = existing ? JSON.parse(existing) : { ${rmKeyName}: recordKey };`);
-    for (const f of (ev && ev.fields) || []) {
-      // Axis values come from tags; plain fields from payload.
-      if (f.axis) {
-        out.line(`view.${camel(f.name)} = tags.${camel(f.name)};`);
-      } else {
-        out.line(`view.${camel(f.name)} = payload.${camel(f.name)};`);
+  // One handler function per (source event, read model) pair.
+  for (const info of rmInfos) {
+    for (const evId of info.sources) {
+      const ev = knownEvents.get(evId);
+      out.line(`async function ${projFnName(evId, info.rm)}(`);
+      out.push();
+      out.line("client: Redis,");
+      out.line("recordKey: string,");
+      out.line("timestamp: string,");
+      out.line("tags: Record<string, string>,");
+      out.line("payload: Record<string, unknown>");
+      out.pop();
+      out.line("): Promise<void> {");
+      out.push();
+      out.line(`// Merge ${tsStr(ev ? ev.label : evId)} into the ${info.view} record.`);
+      out.line(`const existing = await client.get(\`${info.prefix}:\${recordKey}\`);`);
+      out.line(`const view: Record<string, unknown> = existing ? JSON.parse(existing) : { ${info.keyName}: recordKey };`);
+      for (const f of (ev && ev.fields) || []) {
+        if (f.axis) {
+          out.line(`if (tags.${camel(f.name)} !== undefined) view.${camel(f.name)} = tags.${camel(f.name)};`);
+        } else {
+          out.line(`if (payload.${camel(f.name)} !== undefined) view.${camel(f.name)} = payload.${camel(f.name)};`);
+        }
       }
+      out.line(`const pipeline = client.pipeline();`);
+      out.line(`pipeline.set(\`${info.prefix}:\${recordKey}\`, JSON.stringify(view));`);
+      out.line(`pipeline.zadd('${info.prefix}:all', Date.parse(timestamp).toString(), recordKey);`);
+      out.line("await pipeline.exec();");
+      out.pop();
+      out.line("}");
+      out.blank();
     }
-    out.line("// TODO: set view.status to the status this event transitions to.");
-    out.line(`const pipeline = client.pipeline();`);
-    out.line(`pipeline.set(\`${keyPrefix}:\${recordKey}\`, JSON.stringify(view));`);
-    out.line(`pipeline.zadd('${keyPrefix}:all', Date.parse(timestamp).toString(), recordKey);`);
-    out.line("await pipeline.exec();");
-    out.pop();
-    out.line("}");
-    out.blank();
   }
 
-  // ── Query Lambda snippet (read the Redis read model behind a GET route).
-  out.line("// ── Query Lambda (read side) — serves GET from the Redis read model ──");
-  out.line("// Reads the projection only; never touches the event store. This is the");
-  out.line("// query half of CQRS (e.g. GET /api/" + keyPrefix + "/{id}).");
+  // ── Query Lambda snippet (read any read model behind a GET route).
+  out.line("// ── Query Lambda (read side) — serves GET from the Redis read models ─");
+  out.line("// Reads the projection only; never touches the event store. Selects the");
+  out.line("// read model via the `view` query-string param (defaults to the first);");
+  out.line("// `GET /api/records?view=demandForecast&id=standard` reads one record,");
+  out.line("// omitting `id` lists the most recent. Unknown views return 400.");
+  out.line("const READ_MODELS: Record<string, string> = {");
+  out.push();
+  for (const info of rmInfos) out.line(`${tsStr(info.prefix)}: ${tsStr(info.prefix)},`);
+  out.pop();
+  out.line("};");
+  out.line(`const DEFAULT_VIEW = ${tsStr(rmInfos[0].prefix)};`);
+  out.blank();
   out.line("export async function queryHandler(");
   out.push();
   out.line("event: APIGatewayProxyEvent");
@@ -1801,18 +1876,25 @@ function genAwsProjection(out, parts, model) {
   out.line("): Promise<APIGatewayProxyResult> {");
   out.push();
   out.line("const client = getRedis();");
-  out.line("const id = event.pathParameters?.id;");
+  out.line("const view = event.queryStringParameters?.view ?? DEFAULT_VIEW;");
+  out.line("const prefix = READ_MODELS[view];");
+  out.line("if (!prefix) {");
+  out.push();
+  out.line("return response(400, { error: `Unknown view: '${view}'`, views: Object.keys(READ_MODELS) });");
+  out.pop();
+  out.line("}");
+  out.line("const id = event.pathParameters?.id ?? event.queryStringParameters?.id;");
   out.line("if (id) {");
   out.push();
-  out.line(`const data = await client.get(\`${keyPrefix}:\${id}\`);`);
+  out.line("const data = await client.get(`${prefix}:${id}`);");
   out.line("if (!data) return response(404, { error: 'Not found' });");
   out.line("return response(200, JSON.parse(data));");
   out.pop();
   out.line("}");
-  out.line(`const ids = await client.zrevrange('${keyPrefix}:all', 0, 49);`);
+  out.line("const ids = await client.zrevrange(`${prefix}:all`, 0, 49);");
   out.line("if (ids.length === 0) return response(200, []);");
   out.line("const pipeline = client.pipeline();");
-  out.line(`for (const key of ids) pipeline.get(\`${keyPrefix}:\${key}\`);`);
+  out.line("for (const key of ids) pipeline.get(`${prefix}:${key}`);");
   out.line("const results = await pipeline.exec();");
   out.line("const items = (results || [])");
   out.push();
@@ -2680,6 +2762,20 @@ export function generateAwsNative({ model, tests, sliceName, decidedExclusions =
   }
   if (part === "infra") {
     return generateAwsInfra({ model, sliceName, tier });
+  }
+  if (part === "projection") {
+    // Model-level read side: one projector + query over EVERY read model in
+    // the model (not a single slice). Partition the whole model, then drop
+    // commands so the projection path runs across all read models and folds
+    // each source event into its own read model.
+    const out = new Emitter();
+    const parts = partition(model);
+    parts.command = [];
+    genAwsHeader(out, sliceName || "views");
+    genAwsSliceImports(out, parts);
+    genAwsInterfaces(out, parts);
+    genAwsProjection(out, parts, model);
+    return out.toString();
   }
 
   const out = new Emitter();

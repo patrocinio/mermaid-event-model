@@ -104,7 +104,7 @@ export async function handler(
     try {
         if (event.httpMethod !== 'POST') return response(405, { error: 'Method not allowed' });
         const body = event.body ? JSON.parse(event.body) : {};
-        // Route: handle "Register"
+        // Only one command in this slice.
         return handleRegister(event, body);
     } catch (err) {
         console.error('Command handler error:', err);

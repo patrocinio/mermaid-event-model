@@ -61,21 +61,20 @@ async function processRecord(client: Redis, record: DynamoDBRecord): Promise<voi
     if (!record.dynamodb?.NewImage) return;
     const item = unmarshall(record.dynamodb.NewImage as Record<string, AttributeValue>) as DomainEvent;
     const { eventId, eventType, timestamp, tags, payload } = item;
-    // The record key: the read model's identity from the event tags, else the eventId.
-    const recordKey = tags["roomNumber"] ?? eventId;
     switch (eventType) {
         case EventTypes.AVAILABILITY_ROLLED:
-            await onAvailabilityRolled(client, recordKey, timestamp, tags, payload);
+            await onAvailabilityRolledIntoAvail(client, tags["roomNumber"] ?? eventId, timestamp, tags, payload);
             break;
         case EventTypes.BOOKED:
-            await onBooked(client, recordKey, timestamp, tags, payload);
+            await onBookedIntoAvail(client, tags["roomNumber"] ?? eventId, timestamp, tags, payload);
             break;
         default:
-            console.warn(`Unknown event type: ${eventType}`);
+            // Event not consumed by any read model in this model — ignore.
+            break;
     }
 }
 
-async function onAvailabilityRolled(
+async function onAvailabilityRolledIntoAvail(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -85,20 +84,19 @@ async function onAvailabilityRolled(
     // Merge "Availability Rolled" into the AvailReadModel record.
     const existing = await client.get(`avail:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { roomNumber: recordKey };
-    view.roomNumber = tags.roomNumber;
-    view.roomType = payload.roomType;
-    view.capacity = payload.capacity;
-    view.fromNight = payload.fromNight;
-    view.throughNight = payload.throughNight;
-    view.rolledAt = payload.rolledAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.roomNumber !== undefined) view.roomNumber = tags.roomNumber;
+    if (payload.roomType !== undefined) view.roomType = payload.roomType;
+    if (payload.capacity !== undefined) view.capacity = payload.capacity;
+    if (payload.fromNight !== undefined) view.fromNight = payload.fromNight;
+    if (payload.throughNight !== undefined) view.throughNight = payload.throughNight;
+    if (payload.rolledAt !== undefined) view.rolledAt = payload.rolledAt;
     const pipeline = client.pipeline();
     pipeline.set(`avail:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('avail:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-async function onBooked(
+async function onBookedIntoAvail(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -108,36 +106,47 @@ async function onBooked(
     // Merge "Room Booked" into the AvailReadModel record.
     const existing = await client.get(`avail:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { roomNumber: recordKey };
-    view.bookingId = tags.bookingId;
-    view.roomNumber = tags.roomNumber;
-    view.email = payload.email;
-    view.checkIn = payload.checkIn;
-    view.checkOut = payload.checkOut;
-    view.bookedAt = payload.bookedAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.bookingId !== undefined) view.bookingId = tags.bookingId;
+    if (tags.roomNumber !== undefined) view.roomNumber = tags.roomNumber;
+    if (payload.email !== undefined) view.email = payload.email;
+    if (payload.checkIn !== undefined) view.checkIn = payload.checkIn;
+    if (payload.checkOut !== undefined) view.checkOut = payload.checkOut;
+    if (payload.bookedAt !== undefined) view.bookedAt = payload.bookedAt;
     const pipeline = client.pipeline();
     pipeline.set(`avail:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('avail:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-// ── Query Lambda (read side) — serves GET from the Redis read model ──
-// Reads the projection only; never touches the event store. This is the
-// query half of CQRS (e.g. GET /api/avail/{id}).
+// ── Query Lambda (read side) — serves GET from the Redis read models ─
+// Reads the projection only; never touches the event store. Selects the
+// read model via the `view` query-string param (defaults to the first);
+// `GET /api/records?view=demandForecast&id=standard` reads one record,
+// omitting `id` lists the most recent. Unknown views return 400.
+const READ_MODELS: Record<string, string> = {
+    "avail": "avail",
+};
+const DEFAULT_VIEW = "avail";
+
 export async function queryHandler(
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> {
     const client = getRedis();
-    const id = event.pathParameters?.id;
+    const view = event.queryStringParameters?.view ?? DEFAULT_VIEW;
+    const prefix = READ_MODELS[view];
+    if (!prefix) {
+        return response(400, { error: `Unknown view: '${view}'`, views: Object.keys(READ_MODELS) });
+    }
+    const id = event.pathParameters?.id ?? event.queryStringParameters?.id;
     if (id) {
-        const data = await client.get(`avail:${id}`);
+        const data = await client.get(`${prefix}:${id}`);
         if (!data) return response(404, { error: 'Not found' });
         return response(200, JSON.parse(data));
     }
-    const ids = await client.zrevrange('avail:all', 0, 49);
+    const ids = await client.zrevrange(`${prefix}:all`, 0, 49);
     if (ids.length === 0) return response(200, []);
     const pipeline = client.pipeline();
-    for (const key of ids) pipeline.get(`avail:${key}`);
+    for (const key of ids) pipeline.get(`${prefix}:${key}`);
     const results = await pipeline.exec();
     const items = (results || [])
         .map(([err, data]) => (err ? null : data ? JSON.parse(data as string) : null))

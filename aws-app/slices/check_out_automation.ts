@@ -109,7 +109,7 @@ export async function handler(
     try {
         if (event.httpMethod !== 'POST') return response(405, { error: 'Method not allowed' });
         const body = event.body ? JSON.parse(event.body) : {};
-        // Route: handle "Checked Out"
+        // Only one command in this slice.
         return handleCheckOut(event, body);
     } catch (err) {
         console.error('Command handler error:', err);
@@ -146,9 +146,13 @@ async function handleCheckOut(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             bookingId: bookingId,
         };
         // Prediction returned by the endpoint (the event's inferred fields).

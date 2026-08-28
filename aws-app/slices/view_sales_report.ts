@@ -56,18 +56,17 @@ async function processRecord(client: Redis, record: DynamoDBRecord): Promise<voi
     if (!record.dynamodb?.NewImage) return;
     const item = unmarshall(record.dynamodb.NewImage as Record<string, AttributeValue>) as DomainEvent;
     const { eventId, eventType, timestamp, tags, payload } = item;
-    // The record key: the read model's identity from the event tags, else the eventId.
-    const recordKey = tags["totalRevenue"] ?? eventId;
     switch (eventType) {
         case EventTypes.PAYMENT_SUCCEEDED:
-            await onPaymentSucceeded(client, recordKey, timestamp, tags, payload);
+            await onPaymentSucceededIntoSalesReport(client, tags["totalRevenue"] ?? eventId, timestamp, tags, payload);
             break;
         default:
-            console.warn(`Unknown event type: ${eventType}`);
+            // Event not consumed by any read model in this model — ignore.
+            break;
     }
 }
 
-async function onPaymentSucceeded(
+async function onPaymentSucceededIntoSalesReport(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -77,35 +76,46 @@ async function onPaymentSucceeded(
     // Merge "Payment Succeeded" into the SalesReportReadModel record.
     const existing = await client.get(`salesReport:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { totalRevenue: recordKey };
-    view.paymentId = tags.paymentId;
-    view.bookingId = tags.bookingId;
-    view.amount = payload.amount;
-    view.transactionRef = payload.transactionRef;
-    view.succeededAt = payload.succeededAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.paymentId !== undefined) view.paymentId = tags.paymentId;
+    if (tags.bookingId !== undefined) view.bookingId = tags.bookingId;
+    if (payload.amount !== undefined) view.amount = payload.amount;
+    if (payload.transactionRef !== undefined) view.transactionRef = payload.transactionRef;
+    if (payload.succeededAt !== undefined) view.succeededAt = payload.succeededAt;
     const pipeline = client.pipeline();
     pipeline.set(`salesReport:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('salesReport:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-// ── Query Lambda (read side) — serves GET from the Redis read model ──
-// Reads the projection only; never touches the event store. This is the
-// query half of CQRS (e.g. GET /api/salesReport/{id}).
+// ── Query Lambda (read side) — serves GET from the Redis read models ─
+// Reads the projection only; never touches the event store. Selects the
+// read model via the `view` query-string param (defaults to the first);
+// `GET /api/records?view=demandForecast&id=standard` reads one record,
+// omitting `id` lists the most recent. Unknown views return 400.
+const READ_MODELS: Record<string, string> = {
+    "salesReport": "salesReport",
+};
+const DEFAULT_VIEW = "salesReport";
+
 export async function queryHandler(
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> {
     const client = getRedis();
-    const id = event.pathParameters?.id;
+    const view = event.queryStringParameters?.view ?? DEFAULT_VIEW;
+    const prefix = READ_MODELS[view];
+    if (!prefix) {
+        return response(400, { error: `Unknown view: '${view}'`, views: Object.keys(READ_MODELS) });
+    }
+    const id = event.pathParameters?.id ?? event.queryStringParameters?.id;
     if (id) {
-        const data = await client.get(`salesReport:${id}`);
+        const data = await client.get(`${prefix}:${id}`);
         if (!data) return response(404, { error: 'Not found' });
         return response(200, JSON.parse(data));
     }
-    const ids = await client.zrevrange('salesReport:all', 0, 49);
+    const ids = await client.zrevrange(`${prefix}:all`, 0, 49);
     if (ids.length === 0) return response(200, []);
     const pipeline = client.pipeline();
-    for (const key of ids) pipeline.get(`salesReport:${key}`);
+    for (const key of ids) pipeline.get(`${prefix}:${key}`);
     const results = await pipeline.exec();
     const items = (results || [])
         .map(([err, data]) => (err ? null : data ? JSON.parse(data as string) : null))

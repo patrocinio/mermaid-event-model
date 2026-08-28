@@ -69,24 +69,23 @@ async function processRecord(client: Redis, record: DynamoDBRecord): Promise<voi
     if (!record.dynamodb?.NewImage) return;
     const item = unmarshall(record.dynamodb.NewImage as Record<string, AttributeValue>) as DomainEvent;
     const { eventId, eventType, timestamp, tags, payload } = item;
-    // The record key: the read model's identity from the event tags, else the eventId.
-    const recordKey = tags["paymentId"] ?? eventId;
     switch (eventType) {
         case EventTypes.PAYMENT_REQUESTED:
-            await onPaymentRequested(client, recordKey, timestamp, tags, payload);
+            await onPaymentRequestedIntoPaymentsToProcess(client, tags["paymentId"] ?? eventId, timestamp, tags, payload);
             break;
         case EventTypes.PAYMENT_SUBMITTED:
-            await onPaymentSubmitted(client, recordKey, timestamp, tags, payload);
+            await onPaymentSubmittedIntoPaymentsToProcess(client, tags["paymentId"] ?? eventId, timestamp, tags, payload);
             break;
         case EventTypes.PAYMENT_SUCCEEDED:
-            await onPaymentSucceeded(client, recordKey, timestamp, tags, payload);
+            await onPaymentSucceededIntoPaymentsToProcess(client, tags["paymentId"] ?? eventId, timestamp, tags, payload);
             break;
         default:
-            console.warn(`Unknown event type: ${eventType}`);
+            // Event not consumed by any read model in this model — ignore.
+            break;
     }
 }
 
-async function onPaymentRequested(
+async function onPaymentRequestedIntoPaymentsToProcess(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -96,20 +95,19 @@ async function onPaymentRequested(
     // Merge "Payment Requested" into the PaymentsToProcessReadModel record.
     const existing = await client.get(`paymentsToProcess:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { paymentId: recordKey };
-    view.paymentId = tags.paymentId;
-    view.bookingId = tags.bookingId;
-    view.amount = payload.amount;
-    view.currency = payload.currency;
-    view.paymentMethod = payload.paymentMethod;
-    view.requestedAt = payload.requestedAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.paymentId !== undefined) view.paymentId = tags.paymentId;
+    if (tags.bookingId !== undefined) view.bookingId = tags.bookingId;
+    if (payload.amount !== undefined) view.amount = payload.amount;
+    if (payload.currency !== undefined) view.currency = payload.currency;
+    if (payload.paymentMethod !== undefined) view.paymentMethod = payload.paymentMethod;
+    if (payload.requestedAt !== undefined) view.requestedAt = payload.requestedAt;
     const pipeline = client.pipeline();
     pipeline.set(`paymentsToProcess:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('paymentsToProcess:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-async function onPaymentSubmitted(
+async function onPaymentSubmittedIntoPaymentsToProcess(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -119,18 +117,17 @@ async function onPaymentSubmitted(
     // Merge "Payment Submitted" into the PaymentsToProcessReadModel record.
     const existing = await client.get(`paymentsToProcess:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { paymentId: recordKey };
-    view.paymentId = tags.paymentId;
-    view.bookingId = payload.bookingId;
-    view.amount = payload.amount;
-    view.submittedAt = payload.submittedAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.paymentId !== undefined) view.paymentId = tags.paymentId;
+    if (payload.bookingId !== undefined) view.bookingId = payload.bookingId;
+    if (payload.amount !== undefined) view.amount = payload.amount;
+    if (payload.submittedAt !== undefined) view.submittedAt = payload.submittedAt;
     const pipeline = client.pipeline();
     pipeline.set(`paymentsToProcess:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('paymentsToProcess:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-async function onPaymentSucceeded(
+async function onPaymentSucceededIntoPaymentsToProcess(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -140,35 +137,46 @@ async function onPaymentSucceeded(
     // Merge "Payment Succeeded" into the PaymentsToProcessReadModel record.
     const existing = await client.get(`paymentsToProcess:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { paymentId: recordKey };
-    view.paymentId = tags.paymentId;
-    view.bookingId = tags.bookingId;
-    view.amount = payload.amount;
-    view.transactionRef = payload.transactionRef;
-    view.succeededAt = payload.succeededAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.paymentId !== undefined) view.paymentId = tags.paymentId;
+    if (tags.bookingId !== undefined) view.bookingId = tags.bookingId;
+    if (payload.amount !== undefined) view.amount = payload.amount;
+    if (payload.transactionRef !== undefined) view.transactionRef = payload.transactionRef;
+    if (payload.succeededAt !== undefined) view.succeededAt = payload.succeededAt;
     const pipeline = client.pipeline();
     pipeline.set(`paymentsToProcess:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('paymentsToProcess:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-// ── Query Lambda (read side) — serves GET from the Redis read model ──
-// Reads the projection only; never touches the event store. This is the
-// query half of CQRS (e.g. GET /api/paymentsToProcess/{id}).
+// ── Query Lambda (read side) — serves GET from the Redis read models ─
+// Reads the projection only; never touches the event store. Selects the
+// read model via the `view` query-string param (defaults to the first);
+// `GET /api/records?view=demandForecast&id=standard` reads one record,
+// omitting `id` lists the most recent. Unknown views return 400.
+const READ_MODELS: Record<string, string> = {
+    "paymentsToProcess": "paymentsToProcess",
+};
+const DEFAULT_VIEW = "paymentsToProcess";
+
 export async function queryHandler(
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> {
     const client = getRedis();
-    const id = event.pathParameters?.id;
+    const view = event.queryStringParameters?.view ?? DEFAULT_VIEW;
+    const prefix = READ_MODELS[view];
+    if (!prefix) {
+        return response(400, { error: `Unknown view: '${view}'`, views: Object.keys(READ_MODELS) });
+    }
+    const id = event.pathParameters?.id ?? event.queryStringParameters?.id;
     if (id) {
-        const data = await client.get(`paymentsToProcess:${id}`);
+        const data = await client.get(`${prefix}:${id}`);
         if (!data) return response(404, { error: 'Not found' });
         return response(200, JSON.parse(data));
     }
-    const ids = await client.zrevrange('paymentsToProcess:all', 0, 49);
+    const ids = await client.zrevrange(`${prefix}:all`, 0, 49);
     if (ids.length === 0) return response(200, []);
     const pipeline = client.pipeline();
-    for (const key of ids) pipeline.get(`paymentsToProcess:${key}`);
+    for (const key of ids) pipeline.get(`${prefix}:${key}`);
     const results = await pipeline.exec();
     const items = (results || [])
         .map(([err, data]) => (err ? null : data ? JSON.parse(data as string) : null))

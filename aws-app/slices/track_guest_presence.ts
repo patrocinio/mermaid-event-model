@@ -55,21 +55,20 @@ async function processRecord(client: Redis, record: DynamoDBRecord): Promise<voi
     if (!record.dynamodb?.NewImage) return;
     const item = unmarshall(record.dynamodb.NewImage as Record<string, AttributeValue>) as DomainEvent;
     const { eventId, eventType, timestamp, tags, payload } = item;
-    // The record key: the read model's identity from the event tags, else the eventId.
-    const recordKey = tags["email"] ?? eventId;
     switch (eventType) {
         case EventTypes.CHECKED_IN:
-            await onCheckedIn(client, recordKey, timestamp, tags, payload);
+            await onCheckedInIntoGuestRoster(client, tags["email"] ?? eventId, timestamp, tags, payload);
             break;
         case EventTypes.GUEST_LEFT:
-            await onGuestLeft(client, recordKey, timestamp, tags, payload);
+            await onGuestLeftIntoGuestRoster(client, tags["email"] ?? eventId, timestamp, tags, payload);
             break;
         default:
-            console.warn(`Unknown event type: ${eventType}`);
+            // Event not consumed by any read model in this model — ignore.
+            break;
     }
 }
 
-async function onCheckedIn(
+async function onCheckedInIntoGuestRoster(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -79,18 +78,17 @@ async function onCheckedIn(
     // Merge "Checked In" into the GuestRosterReadModel record.
     const existing = await client.get(`guestRoster:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { email: recordKey };
-    view.bookingId = tags.bookingId;
-    view.email = tags.email;
-    view.roomNumber = payload.roomNumber;
-    view.checkedInAt = payload.checkedInAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.bookingId !== undefined) view.bookingId = tags.bookingId;
+    if (tags.email !== undefined) view.email = tags.email;
+    if (payload.roomNumber !== undefined) view.roomNumber = payload.roomNumber;
+    if (payload.checkedInAt !== undefined) view.checkedInAt = payload.checkedInAt;
     const pipeline = client.pipeline();
     pipeline.set(`guestRoster:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('guestRoster:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-async function onGuestLeft(
+async function onGuestLeftIntoGuestRoster(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -100,32 +98,43 @@ async function onGuestLeft(
     // Merge "Guest Left Hotel" into the GuestRosterReadModel record.
     const existing = await client.get(`guestRoster:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { email: recordKey };
-    view.email = payload.email;
-    view.departedAt = payload.departedAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (payload.email !== undefined) view.email = payload.email;
+    if (payload.departedAt !== undefined) view.departedAt = payload.departedAt;
     const pipeline = client.pipeline();
     pipeline.set(`guestRoster:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('guestRoster:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-// ── Query Lambda (read side) — serves GET from the Redis read model ──
-// Reads the projection only; never touches the event store. This is the
-// query half of CQRS (e.g. GET /api/guestRoster/{id}).
+// ── Query Lambda (read side) — serves GET from the Redis read models ─
+// Reads the projection only; never touches the event store. Selects the
+// read model via the `view` query-string param (defaults to the first);
+// `GET /api/records?view=demandForecast&id=standard` reads one record,
+// omitting `id` lists the most recent. Unknown views return 400.
+const READ_MODELS: Record<string, string> = {
+    "guestRoster": "guestRoster",
+};
+const DEFAULT_VIEW = "guestRoster";
+
 export async function queryHandler(
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> {
     const client = getRedis();
-    const id = event.pathParameters?.id;
+    const view = event.queryStringParameters?.view ?? DEFAULT_VIEW;
+    const prefix = READ_MODELS[view];
+    if (!prefix) {
+        return response(400, { error: `Unknown view: '${view}'`, views: Object.keys(READ_MODELS) });
+    }
+    const id = event.pathParameters?.id ?? event.queryStringParameters?.id;
     if (id) {
-        const data = await client.get(`guestRoster:${id}`);
+        const data = await client.get(`${prefix}:${id}`);
         if (!data) return response(404, { error: 'Not found' });
         return response(200, JSON.parse(data));
     }
-    const ids = await client.zrevrange('guestRoster:all', 0, 49);
+    const ids = await client.zrevrange(`${prefix}:all`, 0, 49);
     if (ids.length === 0) return response(200, []);
     const pipeline = client.pipeline();
-    for (const key of ids) pipeline.get(`guestRoster:${key}`);
+    for (const key of ids) pipeline.get(`${prefix}:${key}`);
     const results = await pipeline.exec();
     const items = (results || [])
         .map(([err, data]) => (err ? null : data ? JSON.parse(data as string) : null))

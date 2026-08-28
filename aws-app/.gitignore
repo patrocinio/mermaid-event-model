@@ -14,6 +14,9 @@ cdk.context.json
 *.tsbuildinfo
 !emit.mjs
 
+# SageMaker model package (build artifact — rebuild from sagemaker/inference.py)
+sagemaker/model.tar.gz
+
 # logs / env
 *.log
 .env

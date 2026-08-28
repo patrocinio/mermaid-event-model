@@ -55,18 +55,17 @@ async function processRecord(client: Redis, record: DynamoDBRecord): Promise<voi
     if (!record.dynamodb?.NewImage) return;
     const item = unmarshall(record.dynamodb.NewImage as Record<string, AttributeValue>) as DomainEvent;
     const { eventId, eventType, timestamp, tags, payload } = item;
-    // The record key: the read model's identity from the event tags, else the eventId.
-    const recordKey = tags["roomType"] ?? eventId;
     switch (eventType) {
         case EventTypes.OCCUPANCY_FORECASTED:
-            await onOccupancyForecasted(client, recordKey, timestamp, tags, payload);
+            await onOccupancyForecastedIntoDemandForecast(client, tags["roomType"] ?? eventId, timestamp, tags, payload);
             break;
         default:
-            console.warn(`Unknown event type: ${eventType}`);
+            // Event not consumed by any read model in this model — ignore.
+            break;
     }
 }
 
-async function onOccupancyForecasted(
+async function onOccupancyForecastedIntoDemandForecast(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -76,39 +75,50 @@ async function onOccupancyForecasted(
     // Merge "Occupancy Forecasted" into the DemandForecastReadModel record.
     const existing = await client.get(`demandForecast:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { roomType: recordKey };
-    view.forecastId = tags.forecastId;
-    view.roomType = tags.roomType;
-    view.forecastFrom = payload.forecastFrom;
-    view.forecastThrough = payload.forecastThrough;
-    view.predictedOccupancyRate = payload.predictedOccupancyRate;
-    view.predictedDemand = payload.predictedDemand;
-    view.modelVersion = payload.modelVersion;
-    view.endpointName = payload.endpointName;
-    view.forecastedAt = payload.forecastedAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.forecastId !== undefined) view.forecastId = tags.forecastId;
+    if (tags.roomType !== undefined) view.roomType = tags.roomType;
+    if (payload.forecastFrom !== undefined) view.forecastFrom = payload.forecastFrom;
+    if (payload.forecastThrough !== undefined) view.forecastThrough = payload.forecastThrough;
+    if (payload.predictedOccupancyRate !== undefined) view.predictedOccupancyRate = payload.predictedOccupancyRate;
+    if (payload.predictedDemand !== undefined) view.predictedDemand = payload.predictedDemand;
+    if (payload.modelVersion !== undefined) view.modelVersion = payload.modelVersion;
+    if (payload.endpointName !== undefined) view.endpointName = payload.endpointName;
+    if (payload.forecastedAt !== undefined) view.forecastedAt = payload.forecastedAt;
     const pipeline = client.pipeline();
     pipeline.set(`demandForecast:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('demandForecast:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-// ── Query Lambda (read side) — serves GET from the Redis read model ──
-// Reads the projection only; never touches the event store. This is the
-// query half of CQRS (e.g. GET /api/demandForecast/{id}).
+// ── Query Lambda (read side) — serves GET from the Redis read models ─
+// Reads the projection only; never touches the event store. Selects the
+// read model via the `view` query-string param (defaults to the first);
+// `GET /api/records?view=demandForecast&id=standard` reads one record,
+// omitting `id` lists the most recent. Unknown views return 400.
+const READ_MODELS: Record<string, string> = {
+    "demandForecast": "demandForecast",
+};
+const DEFAULT_VIEW = "demandForecast";
+
 export async function queryHandler(
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> {
     const client = getRedis();
-    const id = event.pathParameters?.id;
+    const view = event.queryStringParameters?.view ?? DEFAULT_VIEW;
+    const prefix = READ_MODELS[view];
+    if (!prefix) {
+        return response(400, { error: `Unknown view: '${view}'`, views: Object.keys(READ_MODELS) });
+    }
+    const id = event.pathParameters?.id ?? event.queryStringParameters?.id;
     if (id) {
-        const data = await client.get(`demandForecast:${id}`);
+        const data = await client.get(`${prefix}:${id}`);
         if (!data) return response(404, { error: 'Not found' });
         return response(200, JSON.parse(data));
     }
-    const ids = await client.zrevrange('demandForecast:all', 0, 49);
+    const ids = await client.zrevrange(`${prefix}:all`, 0, 49);
     if (ids.length === 0) return response(200, []);
     const pipeline = client.pipeline();
-    for (const key of ids) pipeline.get(`demandForecast:${key}`);
+    for (const key of ids) pipeline.get(`${prefix}:${key}`);
     const results = await pipeline.exec();
     const items = (results || [])
         .map(([err, data]) => (err ? null : data ? JSON.parse(data as string) : null))

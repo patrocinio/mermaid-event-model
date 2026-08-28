@@ -579,30 +579,41 @@ export async function handler(
     try {
         if (event.httpMethod !== 'POST') return response(405, { error: 'Method not allowed' });
         const body = event.body ? JSON.parse(event.body) : {};
-        // Route: handle "Register"
-        return handleRegister(event, body);
-        // Route: handle "Add Room"
-        return handleAddRoom(event, body);
-        // Route: handle "Roll Availability"
-        return handleRollAvailability(event, body);
-        // Route: handle "Book Room"
-        return handleBookRoom(event, body);
-        // Route: handle "Ready Room"
-        return handleReadyRoom(event, body);
-        // Route: handle "Check-in"
-        return handleCheckin(event, body);
-        // Route: handle "Hotel Proximity Translator"
-        return handleHotelProximityTranslator(event, body);
-        // Route: handle "Checked Out"
-        return handleCheckOut(event, body);
-        // Route: handle "Pay"
-        return handlePay(event, body);
-        // Route: handle "Submit Payment"
-        return handleSubmitPayment(event, body);
-        // Route: handle "Process Payment"
-        return handleProcessPayment(event, body);
-        // Route: handle "Forecast Occupancy"
-        return handleForecastOccupancy(event, body);
+        // Dispatch on the `command` discriminator (body.command or path).
+        const command = String(
+            (body as { command?: unknown }).command ?? event.pathParameters?.command ?? ''
+        );
+        switch (command) {
+            case "Register":
+                return handleRegister(event, body);
+            case "addRoom":
+                return handleAddRoom(event, body);
+            case "rollAvailability":
+                return handleRollAvailability(event, body);
+            case "bookRoom":
+                return handleBookRoom(event, body);
+            case "readyRoom":
+                return handleReadyRoom(event, body);
+            case "checkin":
+                return handleCheckin(event, body);
+            case "hotelProximityTranslator":
+                return handleHotelProximityTranslator(event, body);
+            case "checkOut":
+                return handleCheckOut(event, body);
+            case "pay":
+                return handlePay(event, body);
+            case "submitPayment":
+                return handleSubmitPayment(event, body);
+            case "processPayment":
+                return handleProcessPayment(event, body);
+            case "forecastOccupancy":
+                return handleForecastOccupancy(event, body);
+            default:
+                return response(400, {
+                    error: `Unknown or missing command: '${command}'`,
+                    commands: ["Register", "addRoom", "rollAvailability", "bookRoom", "readyRoom", "checkin", "hotelProximityTranslator", "checkOut", "pay", "submitPayment", "processPayment", "forecastOccupancy"],
+                });
+        }
     } catch (err) {
         console.error('Command handler error:', err);
         return response(500, { error: 'Internal server error' });
@@ -638,9 +649,13 @@ async function handleRegister(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             name: name,
             email: email,
             password: password,
@@ -700,9 +715,13 @@ async function handleAddRoom(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             roomNumber: roomNumber,
             floor: floor,
             roomType: roomType,
@@ -762,9 +781,13 @@ async function handleRollAvailability(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             roomNumber: roomNumber,
             roomType: roomType,
             capacity: capacity,
@@ -833,9 +856,13 @@ async function handleBookRoom(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             email: email,
             roomNumber: roomNumber,
             checkIn: checkIn,
@@ -896,9 +923,13 @@ async function handleReadyRoom(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             roomNumber: roomNumber,
             cleanedBy: cleanedBy,
         };
@@ -953,9 +984,13 @@ async function handleCheckin(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             bookingId: bookingId,
         };
         // Prediction returned by the endpoint (the event's inferred fields).
@@ -1007,9 +1042,13 @@ async function handleHotelProximityTranslator(
         const tags: Record<string, string> = {};
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             email: email,
         };
         // Prediction returned by the endpoint (the event's inferred fields).
@@ -1066,9 +1105,13 @@ async function handleCheckOut(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             bookingId: bookingId,
         };
         // Prediction returned by the endpoint (the event's inferred fields).
@@ -1127,9 +1170,13 @@ async function handlePay(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             bookingId: bookingId,
             amount: amount,
             currency: currency,
@@ -1192,9 +1239,13 @@ async function handleSubmitPayment(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             paymentId: paymentId,
             amount: amount,
             currency: currency,
@@ -1257,9 +1308,13 @@ async function handleProcessPayment(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             paymentId: paymentId,
             gatewayRef: gatewayRef,
         };
@@ -1321,9 +1376,13 @@ async function handleForecastOccupancy(
         };
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model. The command fields and boundary state
-        // are the inputs; adjust the shape to match your endpoint's contract.
+        // Feature vector for the model, in precedence order (later overrides
+        // earlier): the request body (the demand snapshot the caller/scheduler
+        // supplies), the rehydrated boundary state, then the typed command
+        // fields. Adjust the shape to match your endpoint's contract.
         const features: Record<string, unknown> = {
+            ...body,
+            ...(state as unknown as Record<string, unknown>),
             roomType: roomType,
             horizonNights: horizonNights,
         };

@@ -65,24 +65,23 @@ async function processRecord(client: Redis, record: DynamoDBRecord): Promise<voi
     if (!record.dynamodb?.NewImage) return;
     const item = unmarshall(record.dynamodb.NewImage as Record<string, AttributeValue>) as DomainEvent;
     const { eventId, eventType, timestamp, tags, payload } = item;
-    // The record key: the read model's identity from the event tags, else the eventId.
-    const recordKey = tags["roomNumber"] ?? eventId;
     switch (eventType) {
         case EventTypes.ROOM_ADDED:
-            await onRoomAdded(client, recordKey, timestamp, tags, payload);
+            await onRoomAddedIntoHorizon(client, tags["roomNumber"] ?? eventId, timestamp, tags, payload);
             break;
         case EventTypes.WEEK_ELAPSED:
-            await onWeekElapsed(client, recordKey, timestamp, tags, payload);
+            await onWeekElapsedIntoHorizon(client, tags["roomNumber"] ?? eventId, timestamp, tags, payload);
             break;
         case EventTypes.AVAILABILITY_ROLLED:
-            await onAvailabilityRolled(client, recordKey, timestamp, tags, payload);
+            await onAvailabilityRolledIntoHorizon(client, tags["roomNumber"] ?? eventId, timestamp, tags, payload);
             break;
         default:
-            console.warn(`Unknown event type: ${eventType}`);
+            // Event not consumed by any read model in this model — ignore.
+            break;
     }
 }
 
-async function onRoomAdded(
+async function onRoomAddedIntoHorizon(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -92,18 +91,17 @@ async function onRoomAdded(
     // Merge "Room Added" into the HorizonReadModel record.
     const existing = await client.get(`horizon:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { roomNumber: recordKey };
-    view.roomNumber = tags.roomNumber;
-    view.floor = payload.floor;
-    view.roomType = payload.roomType;
-    view.capacity = payload.capacity;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.roomNumber !== undefined) view.roomNumber = tags.roomNumber;
+    if (payload.floor !== undefined) view.floor = payload.floor;
+    if (payload.roomType !== undefined) view.roomType = payload.roomType;
+    if (payload.capacity !== undefined) view.capacity = payload.capacity;
     const pipeline = client.pipeline();
     pipeline.set(`horizon:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('horizon:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-async function onWeekElapsed(
+async function onWeekElapsedIntoHorizon(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -113,15 +111,14 @@ async function onWeekElapsed(
     // Merge "Week Elapsed" into the HorizonReadModel record.
     const existing = await client.get(`horizon:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { roomNumber: recordKey };
-    view.occurredAt = payload.occurredAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (payload.occurredAt !== undefined) view.occurredAt = payload.occurredAt;
     const pipeline = client.pipeline();
     pipeline.set(`horizon:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('horizon:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-async function onAvailabilityRolled(
+async function onAvailabilityRolledIntoHorizon(
     client: Redis,
     recordKey: string,
     timestamp: string,
@@ -131,36 +128,47 @@ async function onAvailabilityRolled(
     // Merge "Availability Rolled" into the HorizonReadModel record.
     const existing = await client.get(`horizon:${recordKey}`);
     const view: Record<string, unknown> = existing ? JSON.parse(existing) : { roomNumber: recordKey };
-    view.roomNumber = tags.roomNumber;
-    view.roomType = payload.roomType;
-    view.capacity = payload.capacity;
-    view.fromNight = payload.fromNight;
-    view.throughNight = payload.throughNight;
-    view.rolledAt = payload.rolledAt;
-    // TODO: set view.status to the status this event transitions to.
+    if (tags.roomNumber !== undefined) view.roomNumber = tags.roomNumber;
+    if (payload.roomType !== undefined) view.roomType = payload.roomType;
+    if (payload.capacity !== undefined) view.capacity = payload.capacity;
+    if (payload.fromNight !== undefined) view.fromNight = payload.fromNight;
+    if (payload.throughNight !== undefined) view.throughNight = payload.throughNight;
+    if (payload.rolledAt !== undefined) view.rolledAt = payload.rolledAt;
     const pipeline = client.pipeline();
     pipeline.set(`horizon:${recordKey}`, JSON.stringify(view));
     pipeline.zadd('horizon:all', Date.parse(timestamp).toString(), recordKey);
     await pipeline.exec();
 }
 
-// ── Query Lambda (read side) — serves GET from the Redis read model ──
-// Reads the projection only; never touches the event store. This is the
-// query half of CQRS (e.g. GET /api/horizon/{id}).
+// ── Query Lambda (read side) — serves GET from the Redis read models ─
+// Reads the projection only; never touches the event store. Selects the
+// read model via the `view` query-string param (defaults to the first);
+// `GET /api/records?view=demandForecast&id=standard` reads one record,
+// omitting `id` lists the most recent. Unknown views return 400.
+const READ_MODELS: Record<string, string> = {
+    "horizon": "horizon",
+};
+const DEFAULT_VIEW = "horizon";
+
 export async function queryHandler(
     event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> {
     const client = getRedis();
-    const id = event.pathParameters?.id;
+    const view = event.queryStringParameters?.view ?? DEFAULT_VIEW;
+    const prefix = READ_MODELS[view];
+    if (!prefix) {
+        return response(400, { error: `Unknown view: '${view}'`, views: Object.keys(READ_MODELS) });
+    }
+    const id = event.pathParameters?.id ?? event.queryStringParameters?.id;
     if (id) {
-        const data = await client.get(`horizon:${id}`);
+        const data = await client.get(`${prefix}:${id}`);
         if (!data) return response(404, { error: 'Not found' });
         return response(200, JSON.parse(data));
     }
-    const ids = await client.zrevrange('horizon:all', 0, 49);
+    const ids = await client.zrevrange(`${prefix}:all`, 0, 49);
     if (ids.length === 0) return response(200, []);
     const pipeline = client.pipeline();
-    for (const key of ids) pipeline.get(`horizon:${key}`);
+    for (const key of ids) pipeline.get(`${prefix}:${key}`);
     const results = await pipeline.exec();
     const items = (results || [])
         .map(([err, data]) => (err ? null : data ? JSON.parse(data as string) : null))
