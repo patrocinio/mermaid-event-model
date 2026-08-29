@@ -37,12 +37,18 @@ stage_site() {
   mkdir -p "$SITE_DIR"
 
   # HTML entry points
-  cp "$ROOT_DIR"/index.html "$ROOT_DIR"/model-viewer.html "$ROOT_DIR"/core-playground.html "$SITE_DIR/"
+  cp "$ROOT_DIR"/index.html "$ROOT_DIR"/model-viewer.html \
+     "$ROOT_DIR"/core-playground.html "$ROOT_DIR"/diff-playground.html "$SITE_DIR/"
 
-  # ES modules
+  # ES modules (index.js transitively imports the rest; the playgrounds import
+  # codegen.js and event-model-diff.js directly, so all must be staged)
   cp "$ROOT_DIR"/index.js "$ROOT_DIR"/event-model.js "$ROOT_DIR"/event-model-mermaid.js \
+     "$ROOT_DIR"/event-model-diff.js \
      "$ROOT_DIR"/slice-tests.js "$ROOT_DIR"/slice-tests-mermaid.js \
      "$ROOT_DIR"/codegen.js "$SITE_DIR/"
+
+  # Bypass Jekyll so raw .md files are served verbatim (harmless on S3)
+  touch "$SITE_DIR/.nojekyll"
 
   # Static assets
   cp "$ROOT_DIR"/settings.png "$SITE_DIR/"
