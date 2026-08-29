@@ -169,7 +169,7 @@
 import mermaid from 'mermaid';
 import { marked } from 'marked';
 import diagramDefinitions from './index.js';
-import { generateFromSource, generateAwsFromSource, generateManifestFromSource, generateManifestCoreFromSource } from './codegen.js';
+import { generateManifestCoreFromSource } from './codegen.js';
 
 await mermaid.registerExternalDiagrams(diagramDefinitions);
 mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });
@@ -269,12 +269,13 @@ function renderSidebar(sliceFiles) {
 // stay disabled until a blueprint exists, so the model → blueprint → code
 // order is enforced by the UI rather than skipped.
 function attachCodegenPanel(container, src, sliceName) {
-  const isModelView = sliceName === MODEL;
-
   const panel = document.createElement('div');
   panel.className = 'codegen';
 
-  // ── Stage 1: Blueprint (stack-independent) ────────────────────────────────
+  // ── Blueprint (stack-independent) ─────────────────────────────────────────
+  // The viewer produces the BLUEPRINT only — never code. Code generation
+  // (Axon, AWS, …) is a downstream step that consumes the blueprint outside
+  // this tool; it deliberately has no button here.
   const bpBar = document.createElement('div');
   bpBar.className = 'codegen-bar';
   const bpTitle = document.createElement('span');
@@ -287,146 +288,50 @@ function attachCodegenPanel(container, src, sliceName) {
   blueprintBtn.className = 'primary';
   blueprintBtn.textContent = 'Generate blueprint (manifest core)';
 
-  const dlCoreBtn = document.createElement('button');
-  dlCoreBtn.type = 'button';
-  dlCoreBtn.textContent = 'Download core.json';
-  dlCoreBtn.disabled = true;
-
-  bpBar.append(blueprintBtn, dlCoreBtn);
-
-  // ── Stage 2: Code (downstream binding) ────────────────────────────────────
-  const codeBar = document.createElement('div');
-  codeBar.className = 'codegen-bar';
-  const codeTitle = document.createElement('span');
-  codeTitle.className = 'codegen-title';
-  codeTitle.textContent = 'Bind to a stack · downstream';
-  codeBar.appendChild(codeTitle);
-
-  const genBtn = document.createElement('button');
-  genBtn.type = 'button';
-  genBtn.textContent = 'Axon (Java)';
-
-  const awsBtn = document.createElement('button');
-  awsBtn.type = 'button';
-  awsBtn.textContent = isModelView ? 'AWS shared runtime' : 'AWS (CDK/TS)';
-
-  const infraBtn = isModelView ? document.createElement('button') : null;
-  if (infraBtn) {
-    infraBtn.type = 'button';
-    infraBtn.textContent = 'AWS infra (CDK)';
-  }
-
   const copyBtn = document.createElement('button');
   copyBtn.type = 'button';
   copyBtn.textContent = 'Copy';
   copyBtn.disabled = true;
 
-  const dlBtn = document.createElement('button');
-  dlBtn.type = 'button';
-  dlBtn.textContent = 'Download';
-  dlBtn.disabled = true;
+  const dlCoreBtn = document.createElement('button');
+  dlCoreBtn.type = 'button';
+  dlCoreBtn.textContent = 'Download core.json';
+  dlCoreBtn.disabled = true;
 
-  const manifestBtn = document.createElement('button');
-  manifestBtn.type = 'button';
-  manifestBtn.textContent = 'Download manifest.json (core+binding)';
-  manifestBtn.disabled = true;
-
-  codeBar.append(genBtn, awsBtn);
-  if (infraBtn) codeBar.append(infraBtn);
-  codeBar.append(copyBtn, dlBtn, manifestBtn);
-
-  // Code generation is gated on the blueprint: the binding is a realisation of
-  // the blueprint, so you cannot emit it before the blueprint exists.
-  const codeButtons = [genBtn, awsBtn, ...(infraBtn ? [infraBtn] : [])];
-  // The full manifest (core+binding) is a stack artifact, so it unlocks with
-  // the code buttons — after the blueprint exists.
-  const setCodeEnabled = (on) => {
-    codeButtons.forEach((b) => (b.disabled = !on));
-    manifestBtn.disabled = !on;
-  };
-  setCodeEnabled(false);
+  bpBar.append(blueprintBtn, copyBtn, dlCoreBtn);
 
   const output = document.createElement('pre');
   output.className = 'codegen-output empty';
   output.textContent =
-    'Step 1 — Generate the blueprint: the stack-independent manifest core ' +
+    'Generate the blueprint: the stack-independent manifest core ' +
     '(command, boundary, pinned event names, and any unmapped fields / decided ' +
-    'exclusions). This is the durable contract that outlives any one stack.\n\n' +
-    'Step 2 — Bind to a stack (Axon / AWS) to emit code from that blueprint. ' +
-    'Code is the disposable realisation; the blueprint is the source of truth. ' +
-    'The stack buttons unlock once a blueprint has been generated.';
+    'exclusions). This is the durable contract that outlives any one stack. ' +
+    'Code generation is a separate downstream step that consumes this blueprint.';
 
-  panel.append(bpBar, codeBar, output);
+  panel.append(bpBar, output);
   container.insertBefore(panel, container.firstChild);
 
-  // ── Shared output/download state ──────────────────────────────────────────
-  let generated = null;
-  let generatedExt = 'json';     // 'json' | 'java' | 'ts'
-  let downloadName = null;       // explicit filename override
-  let blueprintReady = false;
-
   const slug = (sliceName || 'slice').replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
-  const fileBase = ((sliceName || 'slice').replace(/[^a-z0-9]+/gi, ' ').trim().split(/\s+/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('')) || 'Slice';
+  let generated = null;
 
-  const allButtons = [blueprintBtn, ...codeButtons];
-
-  // Runs a producer, shows its output, and sets Copy/Download to match.
-  const run = (btn, restingLabel, produce, ext, name, onSuccess) => {
-    const wasEnabled = allButtons.map((b) => !b.disabled);
-    allButtons.forEach((b) => (b.disabled = true));
-    btn.textContent = 'Generating…';
+  blueprintBtn.addEventListener('click', () => {
+    blueprintBtn.disabled = true;
+    blueprintBtn.textContent = 'Generating…';
     try {
-      generated = produce();
-      generatedExt = ext;
-      downloadName = name || null;
+      generated = generateManifestCoreFromSource(src, { sliceName });
       output.textContent = generated;
       output.classList.remove('empty');
       copyBtn.disabled = false;
-      dlBtn.disabled = false;
-      dlBtn.textContent = 'Download .' + ext;
-      if (onSuccess) onSuccess();
+      dlCoreBtn.disabled = false;
     } catch (err) {
-      console.error('generation failed', err);
-      output.textContent = 'Generation failed:\n' + (err && err.stack ? err.stack : String(err));
+      console.error('blueprint generation failed', err);
+      output.textContent = 'Blueprint generation failed:\n' + (err && err.stack ? err.stack : String(err));
       output.classList.remove('empty');
     } finally {
-      // Restore prior enabled state; onSuccess may have widened it.
-      allButtons.forEach((b, i) => { b.disabled = !wasEnabled[i]; });
-      if (blueprintReady) setCodeEnabled(true);
-      btn.textContent = restingLabel;
+      blueprintBtn.disabled = false;
+      blueprintBtn.textContent = 'Regenerate blueprint (manifest core)';
     }
-  };
-
-  // ── Stage 1 handler: the blueprint ────────────────────────────────────────
-  blueprintBtn.addEventListener('click', () =>
-    run(blueprintBtn, 'Regenerate blueprint (manifest core)',
-      () => generateManifestCoreFromSource(src, { sliceName }), 'json',
-      slug + '.core.json',
-      () => {
-        blueprintReady = true;
-        dlCoreBtn.disabled = false;
-        setCodeEnabled(true);
-      }));
-
-  dlCoreBtn.addEventListener('click', () =>
-    downloadText(generateManifestCoreFromSource(src, { sliceName }),
-      'application/json;charset=utf-8', slug + '.core.json'));
-
-  // ── Stage 2 handlers: bindings (consume the blueprint) ────────────────────
-  genBtn.addEventListener('click', () =>
-    run(genBtn, 'Axon (Java)',
-      () => generateFromSource(src, { sliceName }), 'java'));
-  awsBtn.addEventListener('click', () =>
-    run(awsBtn, isModelView ? 'AWS shared runtime' : 'AWS (CDK/TS)',
-      () => generateAwsFromSource(src, { sliceName }), 'ts',
-      isModelView ? 'event-store.ts' : null));
-  if (infraBtn) {
-    infraBtn.addEventListener('click', () =>
-      run(infraBtn, 'AWS infra (CDK)',
-        () => generateAwsFromSource(src, { sliceName, part: 'infra' }), 'ts',
-        'regional-stack.ts'));
-  }
+  });
 
   copyBtn.addEventListener('click', async () => {
     if (generated == null) return;
@@ -446,27 +351,9 @@ function attachCodegenPanel(container, src, sliceName) {
     setTimeout(() => { copyBtn.textContent = label; }, 1400);
   });
 
-  dlBtn.addEventListener('click', () => {
-    if (generated == null) return;
-    const mime = generatedExt === 'json' ? 'application/json;charset=utf-8'
-      : generatedExt === 'ts' ? 'application/typescript;charset=utf-8'
-      : 'text/x-java-source;charset=utf-8';
-    downloadText(generated, mime, downloadName || (fileBase + '.' + generatedExt));
-  });
-
-  // The FULL binding manifest (core + the disposable binding section). Distinct
-  // from the blueprint's core.json: this one is stack-specific.
-  manifestBtn.addEventListener('click', () => {
-    const label = manifestBtn.textContent;
-    try {
-      downloadText(generateManifestFromSource(src, { sliceName }),
-        'application/json;charset=utf-8', slug + '.manifest.json');
-    } catch (err) {
-      console.error('manifest generation failed', err);
-      manifestBtn.textContent = 'Failed';
-      setTimeout(() => { manifestBtn.textContent = label; }, 1600);
-    }
-  });
+  dlCoreBtn.addEventListener('click', () =>
+    downloadText(generated ?? generateManifestCoreFromSource(src, { sliceName }),
+      'application/json;charset=utf-8', slug + '.core.json'));
 
   return panel;
 }
