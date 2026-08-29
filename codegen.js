@@ -867,17 +867,28 @@ function buildManifest({ model, tests, sliceName, decidedExclusions, patternHint
   const slice = (model.slices && model.slices[0] && model.slices[0].id) || sliceName || "slice";
   const pattern = slicePattern(parts, patternHint);
 
-  // command core (first command, if any)
+  // command core (first command, if any). Fields now carry types + axis flags,
+  // so the core is a self-sufficient blueprint any binding can generate from.
   const cmd = parts.command[0] || null;
   const commandCore = cmd
-    ? { name: typeNameFor(cmd), fields: (cmd.fields || []).map((f) => f.name) }
+    ? {
+        id: cmd.id,
+        name: typeNameFor(cmd),
+        fields: (cmd.fields || []).map((f) => ({ name: f.name, type: f.type, axis: !!f.axis })),
+      }
     : null;
 
-  // boundary: union of reads + the axes used
+  // boundary: the flat union (tags + reads, for the human-readable contract and
+  // the diff acceptance test) plus the explicit branch structure a generator
+  // needs to emit an OR-of-branches consistency boundary.
   const boundary = cmd
     ? {
         tags: axesOf(cmd),
         reads: (cmd.reads || []).map((id) => storedName(id)),
+        branches: (cmd.readBranches || []).map((b) => ({
+          events: (b.events || []).map((id) => ({ id, storedAs: storedName(id) })),
+          axes: b.axes || [],
+        })),
       }
     : null;
 
@@ -889,6 +900,39 @@ function buildManifest({ model, tests, sliceName, decidedExclusions, patternHint
   ).map((id) => ({ name: pascal(id), storedAs: storedName(id) }));
 
   const unmapped = detectUnmapped(parts, producedByCommand, decidedExclusions);
+
+  // The self-contained blueprint: everything a generator needs to emit ANY
+  // binding, all stack-independent. `coreToModel`/`coreToTests` reconstruct a
+  // parsed-model-equivalent from this, so generateAwsFromCore /
+  // generateAxonFromCore never re-parse the DSL. Fields keep types + axis
+  // flags; events keep their lane; tests keep example values and error codes.
+  const fieldsOf = (el) =>
+    (el.fields || []).map((f) => ({ name: f.name, type: f.type, axis: !!f.axis }));
+  const blueprint = {
+    elements: model.elements.map((el) => ({
+      id: el.id,
+      kind: el.kind,
+      lane: el.lane ?? null,
+      label: el.label,
+      fields: fieldsOf(el),
+      reads: el.reads || [],
+      readBranches: (el.readBranches || []).map((b) => ({
+        events: b.events || [],
+        axes: b.axes || [],
+      })),
+    })),
+    edges: model.edges.map((e) => ({ from: e.from, to: e.to })),
+    slices: (model.slices || []).map((s) => ({
+      id: s.id,
+      label: s.label,
+      edges: (s.edges || []).map((e) => ({ from: e.from, to: e.to })),
+      nodeIds: s.nodeIds || [],
+    })),
+    tests: (tests.tests || []).map((t) => ({
+      title: t.title,
+      given: t.given, when: t.when, then: t.then,
+    })),
+  };
 
   // binding (disposable) — symbols per element, test method references
   const symbols = {};
@@ -909,6 +953,8 @@ function buildManifest({ model, tests, sliceName, decidedExclusions, patternHint
     emits: emitList,
     unmapped,
     ...(decidedExclusions && decidedExclusions.length ? { decidedExclusions } : {}),
+    // The reconstructable model + tests — the generator's actual input.
+    blueprint,
     // ---- binding: discarded and regenerated on a rebind ----
     binding: {
       stack: "java-25/axon-5/dcb",
@@ -1084,6 +1130,128 @@ export function generateManifestCoreFromSource(src, opts = {}) {
     decidedExclusions,
   });
   return JSON.stringify(core, null, 2) + "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Core-driven generation — the manifest core IS the generator's input.
+//
+// The enriched core carries a self-contained `blueprint` (elements, edges,
+// slices, tests). These adapters reconstruct a parsed-model-equivalent from it
+// so the existing generators run unchanged — the same core drives either
+// binding, which is the whole point: choose the stack at generation time, not
+// at authoring time.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Accept the core as a JSON string or an already-parsed object.
+function asCore(coreOrJson) {
+  const core = typeof coreOrJson === "string" ? JSON.parse(coreOrJson) : coreOrJson;
+  if (!core || !core.blueprint) {
+    throw new Error(
+      "manifest core has no `blueprint` section — regenerate it with the current generator " +
+      "(generateManifestCoreFromSource); older cores are not self-sufficient for code generation."
+    );
+  }
+  return core;
+}
+
+// Rebuild the parseEventModel-shaped model from a core's blueprint.
+function coreToModel(core) {
+  const bp = core.blueprint;
+  return {
+    actors: [],       // layout-only; codegen does not read these
+    aggregates: [],
+    elements: bp.elements.map((el) => ({
+      id: el.id,
+      kind: el.kind,
+      lane: el.lane ?? null,
+      label: el.label,
+      fields: (el.fields || []).map((f) => ({ name: f.name, type: f.type, axis: !!f.axis })),
+      reads: el.reads || [],
+      readBranches: (el.readBranches || []).map((b) => ({
+        events: b.events || [],
+        axes: b.axes || [],
+      })),
+    })),
+    edges: (bp.edges || []).map((e) => ({ from: e.from, to: e.to })),
+    slices: (bp.slices || []).map((s) => ({
+      id: s.id,
+      label: s.label,
+      edges: (s.edges || []).map((e) => ({ from: e.from, to: e.to })),
+      nodeIds: s.nodeIds || [],
+    })),
+  };
+}
+
+// Rebuild the parseSliceTests-shaped tests object from a core's blueprint.
+function coreToTests(core) {
+  return {
+    tests: (core.blueprint.tests || []).map((t) => ({
+      title: t.title || "",
+      given: t.given || [],
+      when: t.when || [],
+      then: t.then || [],
+    })),
+  };
+}
+
+// Decided exclusions are a core-level list; reuse them for unmapped reconciliation.
+function coreDecidedExclusions(core) {
+  return core.decidedExclusions || [];
+}
+
+/**
+ * Generate the AWS-native (CDK + Lambda, TypeScript) binding from a manifest
+ * core. The core is the sole input — no DSL, no slice spec.
+ * @param {string|object} coreOrJson  a manifest core (JSON string or object)
+ * @param {object} [opts]
+ * @param {string} [opts.sliceName]
+ * @param {('slice'|'runtime'|'infra')} [opts.part]
+ * @param {('production'|'minimal')} [opts.tier]
+ * @returns {string} TypeScript source
+ */
+export function generateAwsFromCore(coreOrJson, opts = {}) {
+  const core = asCore(coreOrJson);
+  return generateAwsNative({
+    model: coreToModel(core),
+    tests: coreToTests(core),
+    sliceName: opts.sliceName || core.slice,
+    decidedExclusions: coreDecidedExclusions(core),
+    part: opts.part || "slice",
+    tier: opts.tier || "production",
+  });
+}
+
+/**
+ * Generate the Axon Framework 5 (Java, DCB) binding from a manifest core.
+ * @param {string|object} coreOrJson  a manifest core (JSON string or object)
+ * @param {object} [opts]
+ * @param {string} [opts.sliceName]
+ * @returns {string} Java source
+ */
+export function generateAxonFromCore(coreOrJson, opts = {}) {
+  const core = asCore(coreOrJson);
+  return generateJava({
+    model: coreToModel(core),
+    tests: coreToTests(core),
+    sliceName: opts.sliceName || core.slice,
+    decidedExclusions: coreDecidedExclusions(core),
+  });
+}
+
+/**
+ * Generate a binding from a manifest core, selecting the target stack.
+ * @param {string|object} coreOrJson
+ * @param {('aws'|'axon')} target
+ * @param {object} [opts]  forwarded to the per-target generator
+ * @returns {string} source in the target language
+ */
+export function generateFromCore(coreOrJson, target, opts = {}) {
+  switch (target) {
+    case "aws":  return generateAwsFromCore(coreOrJson, opts);
+    case "axon": return generateAxonFromCore(coreOrJson, opts);
+    default:
+      throw new Error(`unknown target '${target}' — expected 'aws' or 'axon'`);
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════
