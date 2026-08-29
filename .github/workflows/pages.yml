@@ -28,27 +28,9 @@ jobs:
           node-version-file: '.nvmrc'
 
       - name: Stage static site
-        run: |
-          mkdir -p _site
-          # HTML entry points
-          cp index.html model-viewer.html core-playground.html diff-playground.html _site/
-          # ES modules (index.js transitively imports the rest)
-          cp index.js event-model.js event-model-mermaid.js event-model-diff.js \
-             slice-tests.js slice-tests-mermaid.js codegen.js _site/
-          # Gear icon for automation nodes (event-model.js resolves ./settings.png)
-          cp settings.png _site/
-          # Example model overviews
-          cp blueprint_dsl.md blueprint_dsl_dcb.md blueprint_dsl_fanin.md _site/
-          # Per-slice spec directories
-          cp -R blueprint_dsl_dcb-slices blueprint_dsl_fanin-slices _site/
-          # Bypass Jekyll so the raw .md files are served verbatim
-          touch _site/.nojekyll
-
-      - name: Generate slice manifests
-        # GitHub Pages has no directory listing; the viewer reads these index.json
-        # manifests to populate its slice sidebar (falling back to dir-listing locally).
-        run: |
-          node -e "const fs=require('fs');for(const d of ['blueprint_dsl_dcb-slices','blueprint_dsl_fanin-slices']){const p='_site/'+d;fs.writeFileSync(p+'/index.json',JSON.stringify(fs.readdirSync(p).filter(f=>f.endsWith('.md')).sort()));}"
+        # Single source of truth for what the site contains (files + slice
+        # index.json manifests) — see stage_site() in deploy.sh.
+        run: ./deploy.sh stage
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

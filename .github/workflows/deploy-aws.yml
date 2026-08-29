@@ -52,36 +52,9 @@ jobs:
         run: npm ci
 
       - name: Stage static site
-        run: |
-          mkdir -p _site
-
-          # HTML entry points
-          cp index.html model-viewer.html core-playground.html _site/
-
-          # ES modules
-          cp index.js event-model.js event-model-mermaid.js \
-             slice-tests.js slice-tests-mermaid.js _site/
-
-          # Static assets
-          cp settings.png _site/
-
-          # Example model files
-          cp blueprint_dsl.md blueprint_dsl_dcb.md blueprint_dsl_fanin.md _site/
-
-          # Slice spec directories
-          cp -R blueprint_dsl_dcb-slices blueprint_dsl_fanin-slices _site/
-
-          # Generate slice manifests
-          node -e "
-            const fs = require('fs');
-            for (const d of ['blueprint_dsl_dcb-slices', 'blueprint_dsl_fanin-slices']) {
-              const p = '_site/' + d;
-              const files = fs.readdirSync(p).filter(f => f.endsWith('.md')).sort();
-              fs.writeFileSync(p + '/index.json', JSON.stringify(files));
-            }
-          "
-
-          echo "📦 Staged $(find _site -type f | wc -l) files"
+        # Single source of truth for the staged site (files + slice manifests):
+        # stage_site() in deploy.sh. The subsequent CDK deploy uploads _site/.
+        run: ./deploy.sh stage
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
