@@ -27,6 +27,7 @@
     "slice-tests.js",
     "slice-tests-mermaid.js",
     "codegen.js",
+    "codegen-rust.js",
     "bin/gen.js",
     "settings.png",
     "README.md",

@@ -22,6 +22,7 @@
 //   - Reuses the existing parsers so the DSL keeps a single source of truth.
 
 import { parseEventModel } from "./event-model.js";
+import { generateRustMainFromCore } from "./codegen-rust.js";
 import { parseSliceTests } from "./slice-tests.js";
 
 const BASE_PACKAGE = "com.example.eventmodel";
@@ -1424,9 +1425,35 @@ export function generateFromCore(coreOrJson, target, opts = {}) {
   switch (target) {
     case "aws":  return generateAwsFromCore(coreOrJson, opts);
     case "axon": return generateAxonFromCore(coreOrJson, opts);
+    case "rust": return generateRustFromCore(coreOrJson, opts);
     default:
-      throw new Error(`unknown target '${target}' — expected 'aws' or 'axon'`);
+      throw new Error(`unknown target '${target}' — expected 'aws', 'axon', or 'rust'`);
   }
+}
+
+/**
+ * Generate the Rust AWS-native binding (a single Lambda main.rs) from a
+ * manifest core. Command slices only.
+ * @param {string|object} coreOrJson  a manifest core (JSON string or object)
+ * @param {object} [opts]
+ * @param {string} [opts.sliceName]
+ * @returns {string} Rust source (main.rs)
+ */
+export function generateRustFromCore(coreOrJson, opts = {}) {
+  const core = asCore(coreOrJson);
+  return generateRustMainFromCore(core, { sliceName: opts.sliceName || core.slice });
+}
+
+/**
+ * Convenience: generate the Rust binding directly from a slice `.md` (or raw
+ * DSL) string, by first building the enriched manifest core.
+ * @param {string} src
+ * @param {object} [opts]
+ * @returns {string} Rust source (main.rs)
+ */
+export function generateRustFromSource(src, opts = {}) {
+  const core = JSON.parse(generateManifestCoreFromSource(src, { sliceName: opts.sliceName }));
+  return generateRustMainFromCore(core, { sliceName: opts.sliceName || core.slice });
 }
 
 // ═════════════════════════════════════════════════════════════════════════

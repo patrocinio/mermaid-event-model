@@ -6,10 +6,10 @@
 // own fenced blocks from it, so pass the whole file.
 //
 // Usage:
-//   node bin/gen.js <slice.md> --target aws|axon [options]
+//   node bin/gen.js <slice.md> --target aws|axon|rust [options]
 //
 // Options:
-//   --target, -t   aws | axon                 (required)
+//   --target, -t   aws | axon | rust                 (required)
 //   --via-core     route through the manifest core (spec → core → code);
 //                  proves the core is a sufficient, stack-independent blueprint
 //   --part         aws only: slice | runtime | infra   (default: slice)
@@ -34,7 +34,7 @@ const codegenUrl = new URL("../codegen.js", import.meta.url);
 function usage(msg) {
   if (msg) process.stderr.write(`gen.js: ${msg}\n\n`);
   process.stderr.write(
-    "Usage: node bin/gen.js <slice.md> --target aws|axon [--via-core] " +
+    "Usage: node bin/gen.js <slice.md> --target aws|axon|rust [--via-core] " +
     "[--part slice|runtime|infra] [--tier production|minimal] [--slice <name>] [-o <file>]\n"
   );
   process.exit(msg ? 1 : 0);
@@ -64,8 +64,8 @@ for (let i = 0; i < argv.length; i++) {
 }
 
 if (!input) usage("no input .md file given");
-if (!opts.target) usage("--target is required (aws | axon)");
-if (opts.target !== "aws" && opts.target !== "axon") usage(`--target must be aws or axon, got '${opts.target}'`);
+if (!opts.target) usage("--target is required (aws | axon | rust)");
+if (!["aws", "axon", "rust"].includes(opts.target)) usage(`--target must be aws, axon, or rust, got '${opts.target}'`);
 if (!fs.existsSync(input)) usage(`file not found: ${input}`);
 
 // Default the slice name from the file's `<!-- slice id: X -->` or its basename.
@@ -90,6 +90,8 @@ try {
     });
   } else if (opts.target === "aws") {
     output = cg.generateAwsFromSource(src, { sliceName, part: opts.part, tier: opts.tier });
+  } else if (opts.target === "rust") {
+    output = cg.generateRustFromSource(src, { sliceName });
   } else {
     output = cg.generateFromSource(src, { sliceName });
   }
