@@ -1060,6 +1060,32 @@ export function generateManifestFromSource(src, opts = {}) {
   return JSON.stringify(manifest, null, 2) + "\n";
 }
 
+/**
+ * The blueprint artifact: the manifest CORE only — the stack-independent
+ * contract that must survive a change of architecture unchanged (slice,
+ * pattern, command, boundary, emitted event stored-names, unmapped fields,
+ * decided exclusions). The disposable `binding` section is deliberately
+ * omitted: it belongs to a specific stack and is produced only when code is
+ * generated. This is what the authoring UI emits BEFORE (and instead of) code
+ * — code generation is a downstream step that consumes the blueprint.
+ * @param {string} src  slice spec markdown or raw DSL
+ * @param {object} [opts]
+ * @param {string} [opts.sliceName]
+ * @returns {string} pretty-printed JSON (the manifest core)
+ */
+export function generateManifestCoreFromSource(src, opts = {}) {
+  const model = parseEventModel(src);
+  const tests = parseSliceTests(src);
+  const decidedExclusions = parseDecidedExclusions(src);
+  const { binding, ...core } = buildManifest({
+    model,
+    tests,
+    sliceName: opts.sliceName,
+    decidedExclusions,
+  });
+  return JSON.stringify(core, null, 2) + "\n";
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // AWS-native target — TypeScript CDK + Lambda handlers.
 //
