@@ -142,10 +142,13 @@ async function handlePay(
         const validationError = validateCommand(state, "Pay");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
-            paymentId: paymentId,
+        const tagsRaw: Record<string, string> = {
+            paymentId: paymentId || (state.paymentId == null ? '' : String(state.paymentId)),
             bookingId: bookingId,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             amount: amount,
             currency: currency,

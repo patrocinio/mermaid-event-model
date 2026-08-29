@@ -150,10 +150,13 @@ async function handleBookRoom(
         const validationError = validateCommand(state, "BookRoom");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
-            bookingId: bookingId,
+        const tagsRaw: Record<string, string> = {
+            bookingId: bookingId || (state.bookingId == null ? '' : String(state.bookingId)),
             roomNumber: roomNumber,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             email: email,
             checkIn: checkIn,

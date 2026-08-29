@@ -130,10 +130,13 @@ async function handleCheckin(
         const validationError = validateCommand(state, "Checkin");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             bookingId: bookingId,
-            email: email,
+            email: email || (state.email == null ? '' : String(state.email)),
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             roomNumber: body.roomNumber,
             checkedInAt: body.checkedInAt,

@@ -175,10 +175,13 @@ async function handleForecastOccupancy(
         const validationError = validateCommand(state, "ForecastOccupancy");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
-            forecastId: forecastId,
+        const tagsRaw: Record<string, string> = {
+            forecastId: forecastId || (state.forecastId == null ? '' : String(state.forecastId)),
             roomType: roomType,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
         // Feature vector for the model, in precedence order (later overrides

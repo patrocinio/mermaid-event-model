@@ -153,9 +153,12 @@ async function handleRollAvailability(
         const validationError = validateCommand(state, "RollAvailability");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             roomNumber: roomNumber,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
         // Feature vector for the model, in precedence order (later overrides

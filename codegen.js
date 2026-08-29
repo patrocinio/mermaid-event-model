@@ -1816,9 +1816,15 @@ function genAwsCommandHandler(out, parts, model) {
   if (cmds.length === 0) return false;
   const producedByCommand = producedByCommandMap(model, parts);
   const MAX_RETRIES = 5;
-  // Automation slices (command + automation element) call a SageMaker endpoint
-  // for inference and fold the response into the emitted event's payload.
-  const isAutomation = parts.automation.length > 0;
+  // A command is automation-driven — and so calls a SageMaker endpoint for
+  // inference — only when an `automation --> <command>` edge targets it. This
+  // is per-command, not per-file: a consolidated handler holds many commands,
+  // and only the ones fed by an automation get the inference step (a plain
+  // Command slice like check-in must not).
+  const automationIds = new Set(parts.automation.map((a) => a.id));
+  const automationDrivenCmdIds = new Set(
+    model.edges.filter((e) => automationIds.has(e.from)).map((e) => e.to)
+  );
 
   out.line("// ── Command Lambda (write side, DCB-enforced) ───────────────────────");
   out.line("// API Gateway → this handler. Each command's `reads [types] by [axes]`");
@@ -1893,6 +1899,8 @@ function genAwsCommandHandler(out, parts, model) {
 
   cmds.forEach((cmd) => {
     const cmdType = typeNameFor(cmd);
+    // This command is automation-driven only if an automation edge targets it.
+    const isAutomation = automationDrivenCmdIds.has(cmd.id);
     const produced = producedByCommand.get(cmd.id) || [];
     const emitted = produced.length ? produced : parts.domainEvent.map((e) => e.id);
     const firstEvent = emitted[0] || null;
@@ -1934,14 +1942,38 @@ function genAwsCommandHandler(out, parts, model) {
     }
     out.blank();
 
-    // Build the tags object the produced event carries.
-    const emitTagsObject = () => {
+    // Build the tags object the produced event carries. An axis the command
+    // itself supplies comes from the resolved local; an axis the command does
+    // NOT carry (e.g. `email` on CheckedIn, which originates on the prior
+    // `booked` event) is sourced from the rehydrated boundary `state` when a
+    // boundary exists, falling back to the local. Empty values are dropped so
+    // no empty tag_<axis> GSI key is ever written (DynamoDB rejects those).
+    const cmdAxisFieldNames = new Set((cmd.fields || []).map((f) => f.name));
+    const emitTagsObject = (hasState) => {
       if (eventAxisFields.length === 0) { out.line("const tags: Record<string, string> = {};"); return; }
-      out.line("const tags: Record<string, string> = {");
+      out.line("const tagsRaw: Record<string, string> = {");
       out.push();
-      for (const f of eventAxisFields) out.line(`${camel(f.name)}: ${camel(f.name)},`);
+      for (const f of eventAxisFields) {
+        const local = camel(f.name);
+        let expr;
+        if (cmdAxisFieldNames.has(f.name)) {
+          expr = local; // the command supplies this axis
+        } else if (hasState) {
+          // Not on the command — take it from the folded boundary state.
+          expr = `${local} || (state.${local} == null ? '' : String(state.${local}))`;
+        } else {
+          expr = local;
+        }
+        out.line(`${local}: ${expr},`);
+      }
       out.pop();
       out.line("};");
+      // Drop empty tag values: an unset axis must not become an empty GSI key.
+      out.line("const tags: Record<string, string> = Object.fromEntries(");
+      out.push();
+      out.line("Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')");
+      out.pop();
+      out.line(");");
     };
 
     // Fields the emitted event carries that neither the command supplies nor a
@@ -2012,7 +2044,7 @@ function genAwsCommandHandler(out, parts, model) {
       // No boundary to read: this command is unconditional (a creation). Still
       // written through appendWithinBoundary (with no guards) for a uniform path.
       out.line("// Creation command — no `reads`, so the boundary is empty (no guards).");
-      emitTagsObject();
+      emitTagsObject(false);
       emitSageMakerCall(false);
       emitPayloadObject();
       if (ev) {
@@ -2060,7 +2092,7 @@ function genAwsCommandHandler(out, parts, model) {
       out.line(`const validationError = validateCommand(state, ${tsStr(cmdType)});`);
       out.line("if (validationError) return response(409, { error: validationError });");
       out.blank();
-      emitTagsObject();
+      emitTagsObject(true);
       emitSageMakerCall(true);
       emitPayloadObject();
       if (ev) {
@@ -2558,8 +2590,14 @@ function genAwsSharedRuntime(out) {
   out.line("): Promise<void> {");
   out.push();
   out.line("// The item carries a tag_<axis> attribute per tag so each gsi_<axis> indexes it.");
+  out.line("// Skip empty/undefined tag values: DynamoDB rejects an empty string as a");
+  out.line("// GSI key, and an unset axis simply should not be indexed on this event.");
   out.line("const item: Record<string, unknown> = { ...domainEvent };");
-  out.line("for (const [axis, value] of Object.entries(domainEvent.tags)) item[`tag_${axis}`] = value;");
+  out.line("for (const [axis, value] of Object.entries(domainEvent.tags)) {");
+  out.push();
+  out.line("if (value !== undefined && value !== '') item[`tag_${axis}`] = value;");
+  out.pop();
+  out.line("}");
   out.blank();
   out.line("const txItems: unknown[] = [");
   out.push();

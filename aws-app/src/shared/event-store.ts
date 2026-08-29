@@ -181,8 +181,12 @@ export async function appendWithinBoundary(
     guards: { key: string; lastSeq: string | null }[]
 ): Promise<void> {
     // The item carries a tag_<axis> attribute per tag so each gsi_<axis> indexes it.
+    // Skip empty/undefined tag values: DynamoDB rejects an empty string as a
+    // GSI key, and an unset axis simply should not be indexed on this event.
     const item: Record<string, unknown> = { ...domainEvent };
-    for (const [axis, value] of Object.entries(domainEvent.tags)) item[`tag_${axis}`] = value;
+    for (const [axis, value] of Object.entries(domainEvent.tags)) {
+        if (value !== undefined && value !== '') item[`tag_${axis}`] = value;
+    }
 
     const txItems: unknown[] = [
         { Put: { TableName: TABLE_NAME, Item: item, ConditionExpression: 'attribute_not_exists(eventId)' } },

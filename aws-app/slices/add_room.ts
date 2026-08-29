@@ -135,9 +135,12 @@ async function handleAddRoom(
         const validationError = validateCommand(state, "AddRoom");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             roomNumber: roomNumber,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             floor: floor,
             roomType: roomType,

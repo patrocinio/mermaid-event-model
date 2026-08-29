@@ -139,11 +139,14 @@ async function handleCheckOut(
         const validationError = validateCommand(state, "CheckOut");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             bookingId: bookingId,
-            roomNumber: roomNumber,
-            email: email,
+            roomNumber: roomNumber || (state.roomNumber == null ? '' : String(state.roomNumber)),
+            email: email || (state.email == null ? '' : String(state.email)),
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
         // Feature vector for the model, in precedence order (later overrides

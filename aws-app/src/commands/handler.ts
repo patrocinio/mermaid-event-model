@@ -644,30 +644,15 @@ async function handleRegister(
         const validationError = validateCommand(state, "Register");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             email: email,
         };
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            name: name,
-            email: email,
-            password: password,
-        };
-        // Prediction returned by the endpoint (the event's inferred fields).
-        const prediction = await invokeSageMaker<{
-            registeredAt?: string;
-        }>(features);
-
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             name: name,
-            registeredAt: prediction.registeredAt,
+            registeredAt: body.registeredAt,
         };
         const domainEvent = createEvent(EventTypes.REGISTERED, tags, payload);
 
@@ -710,25 +695,12 @@ async function handleAddRoom(
         const validationError = validateCommand(state, "AddRoom");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             roomNumber: roomNumber,
         };
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            roomNumber: roomNumber,
-            floor: floor,
-            roomType: roomType,
-            capacity: capacity,
-        };
-        const prediction = await invokeSageMaker(features);
-
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             floor: floor,
             roomType: roomType,
@@ -776,9 +748,12 @@ async function handleRollAvailability(
         const validationError = validateCommand(state, "RollAvailability");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             roomNumber: roomNumber,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
         // Feature vector for the model, in precedence order (later overrides
@@ -850,34 +825,18 @@ async function handleBookRoom(
         const validationError = validateCommand(state, "BookRoom");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
-            bookingId: bookingId,
+        const tagsRaw: Record<string, string> = {
+            bookingId: bookingId || (state.bookingId == null ? '' : String(state.bookingId)),
             roomNumber: roomNumber,
         };
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            email: email,
-            roomNumber: roomNumber,
-            checkIn: checkIn,
-            checkOut: checkOut,
-        };
-        // Prediction returned by the endpoint (the event's inferred fields).
-        const prediction = await invokeSageMaker<{
-            bookedAt?: string;
-        }>(features);
-
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             email: email,
             checkIn: checkIn,
             checkOut: checkOut,
-            bookedAt: prediction.bookedAt,
+            bookedAt: body.bookedAt,
         };
         const domainEvent = createEvent(EventTypes.BOOKED, tags, payload);
 
@@ -918,28 +877,14 @@ async function handleReadyRoom(
         const validationError = validateCommand(state, "ReadyRoom");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             roomNumber: roomNumber,
         };
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            roomNumber: roomNumber,
-            cleanedBy: cleanedBy,
-        };
-        // Prediction returned by the endpoint (the event's inferred fields).
-        const prediction = await invokeSageMaker<{
-            readiedAt?: string;
-        }>(features);
-
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
-            readiedAt: prediction.readiedAt,
+            readiedAt: body.readiedAt,
         };
         const domainEvent = createEvent(EventTypes.READY, tags, payload);
 
@@ -978,30 +923,16 @@ async function handleCheckin(
         const validationError = validateCommand(state, "Checkin");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             bookingId: bookingId,
-            email: email,
+            email: email || (state.email == null ? '' : String(state.email)),
         };
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            bookingId: bookingId,
-        };
-        // Prediction returned by the endpoint (the event's inferred fields).
-        const prediction = await invokeSageMaker<{
-            roomNumber?: number;
-            checkedInAt?: string;
-        }>(features);
-
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
-            roomNumber: prediction.roomNumber,
-            checkedInAt: prediction.checkedInAt,
+            roomNumber: body.roomNumber,
+            checkedInAt: body.checkedInAt,
         };
         const domainEvent = createEvent(EventTypes.CHECKED_IN, tags, payload);
 
@@ -1040,25 +971,9 @@ async function handleHotelProximityTranslator(
         if (validationError) return response(409, { error: validationError });
 
         const tags: Record<string, string> = {};
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            email: email,
-        };
-        // Prediction returned by the endpoint (the event's inferred fields).
-        const prediction = await invokeSageMaker<{
-            departedAt?: string;
-        }>(features);
-
         const payload: Record<string, unknown> = {
             email: email,
-            departedAt: prediction.departedAt,
+            departedAt: body.departedAt,
         };
         const domainEvent = createEvent(EventTypes.GUEST_LEFT, tags, payload);
 
@@ -1098,11 +1013,14 @@ async function handleCheckOut(
         const validationError = validateCommand(state, "CheckOut");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             bookingId: bookingId,
-            roomNumber: roomNumber,
-            email: email,
+            roomNumber: roomNumber || (state.roomNumber == null ? '' : String(state.roomNumber)),
+            email: email || (state.email == null ? '' : String(state.email)),
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
         // Feature vector for the model, in precedence order (later overrides
@@ -1164,34 +1082,18 @@ async function handlePay(
         const validationError = validateCommand(state, "Pay");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
-            paymentId: paymentId,
+        const tagsRaw: Record<string, string> = {
+            paymentId: paymentId || (state.paymentId == null ? '' : String(state.paymentId)),
             bookingId: bookingId,
         };
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            bookingId: bookingId,
-            amount: amount,
-            currency: currency,
-            paymentMethod: paymentMethod,
-        };
-        // Prediction returned by the endpoint (the event's inferred fields).
-        const prediction = await invokeSageMaker<{
-            requestedAt?: string;
-        }>(features);
-
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             amount: amount,
             currency: currency,
             paymentMethod: paymentMethod,
-            requestedAt: prediction.requestedAt,
+            requestedAt: body.requestedAt,
         };
         const domainEvent = createEvent(EventTypes.PAYMENT_REQUESTED, tags, payload);
 
@@ -1234,9 +1136,12 @@ async function handleSubmitPayment(
         const validationError = validateCommand(state, "SubmitPayment");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             paymentId: paymentId,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
         // Feature vector for the model, in precedence order (later overrides
@@ -1302,33 +1207,17 @@ async function handleProcessPayment(
         const validationError = validateCommand(state, "ProcessPayment");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             paymentId: paymentId,
-            bookingId: bookingId,
+            bookingId: bookingId || (state.bookingId == null ? '' : String(state.bookingId)),
         };
-
-        // ── Inference: call the SageMaker endpoint for this slice ──────────
-        // Feature vector for the model, in precedence order (later overrides
-        // earlier): the request body (the demand snapshot the caller/scheduler
-        // supplies), the rehydrated boundary state, then the typed command
-        // fields. Adjust the shape to match your endpoint's contract.
-        const features: Record<string, unknown> = {
-            ...body,
-            ...(state as unknown as Record<string, unknown>),
-            paymentId: paymentId,
-            gatewayRef: gatewayRef,
-        };
-        // Prediction returned by the endpoint (the event's inferred fields).
-        const prediction = await invokeSageMaker<{
-            amount?: number;
-            transactionRef?: string;
-            succeededAt?: string;
-        }>(features);
-
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
-            amount: prediction.amount,
-            transactionRef: prediction.transactionRef,
-            succeededAt: prediction.succeededAt,
+            amount: body.amount,
+            transactionRef: body.transactionRef,
+            succeededAt: body.succeededAt,
         };
         const domainEvent = createEvent(EventTypes.PAYMENT_SUCCEEDED, tags, payload);
 
@@ -1370,10 +1259,13 @@ async function handleForecastOccupancy(
         const validationError = validateCommand(state, "ForecastOccupancy");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
-            forecastId: forecastId,
+        const tagsRaw: Record<string, string> = {
+            forecastId: forecastId || (state.forecastId == null ? '' : String(state.forecastId)),
             roomType: roomType,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
 
         // ── Inference: call the SageMaker endpoint for this slice ──────────
         // Feature vector for the model, in precedence order (later overrides

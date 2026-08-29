@@ -136,9 +136,12 @@ async function handleRegister(
         const validationError = validateCommand(state, "Register");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             email: email,
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             name: name,
             registeredAt: body.registeredAt,

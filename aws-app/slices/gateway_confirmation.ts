@@ -146,10 +146,13 @@ async function handleProcessPayment(
         const validationError = validateCommand(state, "ProcessPayment");
         if (validationError) return response(409, { error: validationError });
 
-        const tags: Record<string, string> = {
+        const tagsRaw: Record<string, string> = {
             paymentId: paymentId,
-            bookingId: bookingId,
+            bookingId: bookingId || (state.bookingId == null ? '' : String(state.bookingId)),
         };
+        const tags: Record<string, string> = Object.fromEntries(
+            Object.entries(tagsRaw).filter(([, v]) => v !== undefined && v !== '')
+        );
         const payload: Record<string, unknown> = {
             amount: body.amount,
             transactionRef: body.transactionRef,
