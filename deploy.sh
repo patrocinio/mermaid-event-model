@@ -37,7 +37,8 @@ stage_site() {
   mkdir -p "$SITE_DIR"
 
   # HTML entry points
-  cp "$ROOT_DIR"/index.html "$ROOT_DIR"/model-viewer.html "$ROOT_DIR"/core-playground.html "$SITE_DIR/"
+  cp "$ROOT_DIR"/index.html "$ROOT_DIR"/model-viewer.html "$ROOT_DIR"/core-playground.html \
+     "$ROOT_DIR"/diff-playground.html "$ROOT_DIR"/collab-playground.html "$SITE_DIR/"
 
   # ES modules
   cp "$ROOT_DIR"/index.js "$ROOT_DIR"/event-model.js "$ROOT_DIR"/event-model-mermaid.js \
